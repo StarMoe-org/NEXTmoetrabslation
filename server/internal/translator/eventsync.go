@@ -2,6 +2,7 @@ package translator
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -153,7 +154,7 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 
 	if stoppedByEmpty {
 		fallbackStart := localMax + 1
-		fmt.Printf("[translate] event stories: CN empty streak at event %d, JP-pending fallback from %d\n", lastChecked, fallbackStart)
+		log.Printf("[translate] event stories: CN empty streak at event %d, JP-pending fallback from %d", lastChecked, fallbackStart)
 		fp, err := t.fillEventStoriesJPPending(jpStories, fallbackStart, states)
 		if err != nil {
 			return processed, err

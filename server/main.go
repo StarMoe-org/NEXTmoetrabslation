@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +25,10 @@ import (
 )
 
 func main() {
+	// Timestamped logs (UTC) on stdout so `docker logs` shows operational activity.
+	log.SetFlags(log.LstdFlags | log.LUTC)
+	log.SetPrefix("")
+
 	port := envOr("PORT", "9090")
 	dbPath := envOr("DB_PATH", "./data/moesekai.db")
 	dataDir := envOr("DATA_DIR", "./data")
@@ -101,14 +106,15 @@ func main() {
 	})
 
 	handler := corsMiddleware(mux, allowOrigin)
+	handler = loggingMiddleware(handler)
 
-	fmt.Printf("moesekai server starting on :%s\n", port)
-	fmt.Printf("  db:        %s\n", dbPath)
-	fmt.Printf("  data dir:  %s\n", dataDir)
-	fmt.Printf("  files:     /files/* (public, cacheable)\n")
-	fmt.Printf("  api:       /api/*   (JWT, no-store)\n")
+	log.Printf("moesekai server starting on :%s", port)
+	log.Printf("  db:        %s", dbPath)
+	log.Printf("  data dir:  %s", dataDir)
+	log.Printf("  files:     /files/* (public, cacheable)")
+	log.Printf("  api:       /api/*   (JWT, no-store)")
 	if !cfg.HasMasterKey() {
-		fmt.Println("  WARNING: MOESEKAI_MASTER_KEY not set — secrets cannot be stored")
+		log.Println("  WARNING: MOESEKAI_MASTER_KEY not set — secrets cannot be stored")
 	}
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		fatal("listen", err)
@@ -150,7 +156,7 @@ func seedConfigFromEnv(cfg *config.Config) {
 		}
 	}
 	if seeded > 0 {
-		fmt.Printf("[config] seeded %d settings from environment\n", seeded)
+		log.Printf("[config] seeded %d settings from environment", seeded)
 	}
 }
 
@@ -183,12 +189,12 @@ func seedAdminFromEnv(a *auth.Auth) {
 		if pass != "" {
 			if _, err := a.CreateUser(user, pass, auth.RoleAdmin); err == nil {
 				created++
-				fmt.Printf("[auth] created initial admin %q from env\n", user)
+				log.Printf("[auth] created initial admin %q from env", user)
 			}
 		}
 	}
 	if created > 0 {
-		fmt.Printf("[auth] seeded %d account(s) from environment\n", created)
+		log.Printf("[auth] seeded %d account(s) from environment", created)
 	}
 }
 

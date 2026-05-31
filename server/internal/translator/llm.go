@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -36,6 +37,7 @@ func (t *Translator) callLLM(provider string, texts []string) ([]string, error) 
 		}
 		if err != nil {
 			lastErr = err
+			log.Printf("[llm] %s attempt %d/3 request error: %v", provider, attempt, err)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
@@ -53,8 +55,10 @@ func (t *Translator) callLLM(provider string, texts []string) ([]string, error) 
 			return parsed, nil
 		}
 		lastErr = fmt.Errorf("parse incomplete: %d non-empty of %d", nonEmpty, len(texts))
+		log.Printf("[llm] %s attempt %d/3 %v", provider, attempt, lastErr)
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
+	log.Printf("[llm] %s gave up after 3 retries (texts=%d): %v", provider, len(texts), lastErr)
 	return nil, fmt.Errorf("llm failed after 3 retries (provider=%s, texts=%d): %v", provider, len(texts), lastErr)
 }
 

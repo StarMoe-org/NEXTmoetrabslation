@@ -2,6 +2,7 @@ package translator
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -95,11 +96,13 @@ func (t *Translator) markStart(mode string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.status.Running {
+		log.Printf("[translate] %s rejected: a job is already running", mode)
 		return fmt.Errorf("a translate job is already running")
 	}
 	t.status.Running = true
 	t.status.LastMode = mode
 	t.status.LastError = ""
+	log.Printf("[translate] %s started", mode)
 	return nil
 }
 
@@ -112,11 +115,15 @@ func (t *Translator) setNote(note string) {
 func (t *Translator) markEnd(note string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	mode := t.status.LastMode
 	t.status.Running = false
 	t.status.LastRun = time.Now().UTC().Format(time.RFC3339)
 	t.status.LastNote = note
 	if err != nil {
 		t.status.LastError = err.Error()
+		log.Printf("[translate] %s FAILED: %v", mode, err)
+	} else {
+		log.Printf("[translate] %s done: %s", mode, note)
 	}
 }
 
@@ -298,8 +305,10 @@ func (t *Translator) translateBatch(provider string, keys []string) (map[string]
 		}
 		batch := keys[i:end]
 		t.emit("translate.progress", fmt.Sprintf("AI 翻译中 %d/%d", end, len(keys)), end, len(keys))
+		log.Printf("[translate] batch %d-%d/%d (provider=%s)", i+1, end, len(keys), provider)
 		translated, err := t.callLLM(provider, batch)
 		if err != nil {
+			log.Printf("[translate] batch %d-%d failed: %v", i+1, end, err)
 			return updates, err
 		}
 		for idx, jp := range batch {

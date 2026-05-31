@@ -30,12 +30,14 @@ fi
 
 # Start the Next.js console in the background.
 echo "Starting console (Next.js) on :${WEB_PORT}..."
-( cd /app/web && PORT="${WEB_PORT}" BACKEND_ORIGIN="http://localhost:${BACKEND_PORT}" npx next start -p "${WEB_PORT}" ) &
+( cd /app/web && PORT="${WEB_PORT}" BACKEND_ORIGIN="http://localhost:${BACKEND_PORT}" npx next start -p "${WEB_PORT}" 2>&1 | sed -u 's/^/[web] /' ) &
 
 # Start the Go backend in the background.
 echo "Starting backend (Go) on :${BACKEND_PORT}..."
-( PORT="${BACKEND_PORT}" ./moesekai-server ) &
+( PORT="${BACKEND_PORT}" ./moesekai-server 2>&1 | sed -u 's/^/[backend] /' ) &
 
 # Start nginx as the foreground process (reverse proxy on port 80).
+# Its access/error logs go to /dev/stdout and /dev/stderr (see nginx.conf),
+# so all three services' logs appear together in `docker logs`.
 echo "Starting nginx reverse proxy on :80..."
 exec nginx -g 'daemon off;'

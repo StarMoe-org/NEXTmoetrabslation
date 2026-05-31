@@ -6,6 +6,7 @@ package backup
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -94,8 +95,9 @@ func (m *Manager) scheduleLoop() {
 			day := now.Format("2006-01-02")
 			if now.Hour() == hour && day != lastRunDay {
 				lastRunDay = day
+				log.Printf("[backup] daily scheduled backup starting (hour=%d UTC)", hour)
 				if _, err := m.BackupAll(); err != nil {
-					fmt.Printf("[backup] daily backup failed: %v\n", err)
+					log.Printf("[backup] daily backup failed: %v", err)
 				}
 			}
 		}
@@ -120,13 +122,18 @@ func (m *Manager) BackupAll() (map[string]string, error) {
 	results := map[string]string{}
 	var firstErr error
 
+	log.Printf("[backup] backup starting (s3=%v git=%v)",
+		m.cfg.GetBool(config.KeyBackupS3Enabled, false), m.cfg.GetBool(config.KeyBackupGitEnabled, false))
+
 	if m.cfg.GetBool(config.KeyBackupS3Enabled, false) {
 		if err := m.backupS3(); err != nil {
+			log.Printf("[backup] s3 failed: %v", err)
 			results["s3"] = "error: " + err.Error()
 			if firstErr == nil {
 				firstErr = err
 			}
 		} else {
+			log.Printf("[backup] s3 ok")
 			results["s3"] = "ok"
 			m.mu.Lock()
 			m.status.LastS3Backup = nowRFC3339()
@@ -138,11 +145,13 @@ func (m *Manager) BackupAll() (map[string]string, error) {
 
 	if m.cfg.GetBool(config.KeyBackupGitEnabled, false) {
 		if err := m.backupGit(); err != nil {
+			log.Printf("[backup] git failed: %v", err)
 			results["git"] = "error: " + err.Error()
 			if firstErr == nil {
 				firstErr = err
 			}
 		} else {
+			log.Printf("[backup] git ok")
 			results["git"] = "ok"
 			m.mu.Lock()
 			m.status.LastGitBackup = nowRFC3339()
@@ -179,6 +188,7 @@ func (m *Manager) RestoreFrom(target string) (importer.Result, error) {
 
 	var res importer.Result
 	var err error
+	log.Printf("[backup] restore starting (target=%s)", target)
 	switch target {
 	case "s3":
 		res, err = m.restoreS3()
@@ -188,9 +198,12 @@ func (m *Manager) RestoreFrom(target string) (importer.Result, error) {
 		return res, fmt.Errorf("unknown restore target: %s", target)
 	}
 	if err != nil {
+		log.Printf("[backup] restore from %s failed: %v", target, err)
 		m.setError(err)
 		return res, err
 	}
+	log.Printf("[backup] restore from %s ok: %d categories, %d entries, %d event stories",
+		target, res.Categories, res.Entries, res.EventStories)
 	m.mu.Lock()
 	m.status.LastRestore = nowRFC3339()
 	m.status.LastError = ""
