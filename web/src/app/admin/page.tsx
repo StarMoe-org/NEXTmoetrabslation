@@ -41,6 +41,23 @@ const BACKUP_KEYS = [
   ["backup.daily_hour", "每日备份时刻 (UTC 0-23)"],
 ] as const;
 
+// Per-key help text rendered below the relevant input.
+const SETTING_HINTS: Record<string, React.ReactNode> = {
+  "backup.git.repo_url": (
+    <>
+      私有仓库需要把访问令牌写进 URL，格式：
+      <code>https://&lt;token&gt;@github.com/用户名/仓库名.git</code>
+      。<br />
+      令牌获取（GitHub）：头像 → Settings → Developer settings → Personal access
+      tokens → <b>Fine-grained tokens</b> → Generate new token，选择目标仓库，
+      Repository permissions 里把 <b>Contents</b> 设为 <b>Read and write</b>，生成后
+      复制以 <code>github_pat_</code> 开头的字符串填入上面。<br />
+      示例：<code>https://github_pat_xxx@github.com/yourname/moesekai-backup.git</code>
+      （经典 token 以 <code>ghp_</code> 开头，用法相同）。公开仓库可不带 token。
+    </>
+  ),
+};
+
 export default function AdminPage() {
   const { show } = useToast();
   const [authorized, setAuthorized] = useState<boolean | null>(null);
@@ -64,17 +81,20 @@ export default function AdminPage() {
   }
 
   return (
-    <div style={{ maxWidth: 880, margin: "0 auto", padding: "0 24px 60px" }}>
-      <div className="topnav" style={{ margin: "0 -24px 24px" }}>
+    <div className="admin-page">
+      <div className="topnav">
         <a href="/">控制台</a>
+        <a href="/settings">用户设置</a>
         <a href="/admin" className="active">管理设置</a>
       </div>
-      <UsersCard show={show} />
-      <SettingsCard title="LLM 翻译" keys={LLM_KEYS} show={show} />
-      <UpstreamCard show={show} />
-      <SettingsCard title="上游更新检测" keys={UPSTREAM_KEYS} show={show} />
-      <BackupCard show={show} />
-      <SettingsCard title="备份配置" keys={BACKUP_KEYS} show={show} />
+      <div className="admin-body">
+        <UsersCard show={show} />
+        <SettingsCard title="LLM 翻译" keys={LLM_KEYS} show={show} />
+        <UpstreamCard show={show} />
+        <SettingsCard title="上游更新检测" keys={UPSTREAM_KEYS} show={show} />
+        <BackupCard show={show} />
+        <SettingsCard title="备份配置" keys={BACKUP_KEYS} show={show} />
+      </div>
     </div>
   );
 }
@@ -178,6 +198,7 @@ function SettingsCard({ title, keys, show }: { title: string; keys: readonly (re
             onChange={(e) => setValues((p) => ({ ...p, [k]: e.target.value }))}
             placeholder={values[k] === "********" ? "（已设置，留空不变）" : ""}
           />
+          {SETTING_HINTS[k] && <p className="form-hint">{SETTING_HINTS[k]}</p>}
         </div>
       ))}
       <button className="btn btn-primary" onClick={saveAll}>保存</button>

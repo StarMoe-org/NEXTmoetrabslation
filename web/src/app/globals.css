@@ -163,7 +163,83 @@ kbd {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: margin-left 0.2s ease, width 0.2s ease;
 }
+
+/* ---- Collapsible sidebar ---- */
+
+/* When collapsed on desktop, slide the sidebar fully out of the flex flow. */
+.app.sidebar-collapsed .sidebar {
+  margin-left: -300px;
+}
+
+/* Make room for the floating open button so it doesn't cover the heading. */
+.app.sidebar-collapsed .main-header { padding-left: 64px; }
+.app.sidebar-collapsed .progress-line { padding-left: 64px; }
+
+/* Floating button to reveal the sidebar again. */
+.sidebar-open-btn {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 40;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+  font-size: 16px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar-open-btn:hover { background: var(--surface-3); }
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.icon-btn:hover { background: var(--surface-3); color: var(--text); }
+
+/* Backdrop only matters in mobile drawer mode (hidden on desktop). */
+.sidebar-backdrop { display: none; }
+
+.sidebar-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.badge-toggle { margin-top: 8px; align-self: flex-start; }
+
+/* When the user hides number badges, suppress them globally. */
+.app.badges-hidden .badge { display: none; }
+
+.footer-links { display: flex; gap: 6px; }
+.footer-links .btn { flex: 1; justify-content: center; }
+
+/* Story translated/untranslated marker dot. */
+.story-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.story-dot.done { background: var(--ok); }
+.story-dot.pending { background: var(--warn); }
+
+.badge.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
 
 .sidebar-header {
   padding: 18px 18px 14px;
@@ -406,3 +482,98 @@ kbd {
 .topnav { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .topnav a { padding: 12px 16px; font-size: 13px; color: var(--text-secondary); border-bottom: 2px solid transparent; }
 .topnav a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+
+/* ---- Admin / settings page shell ---- */
+.admin-page { max-width: 880px; margin: 0 auto; }
+.admin-body { padding: 24px; }
+
+/* Per-key help text under a settings input. */
+.form-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.form-hint code {
+  font-family: var(--font-sans);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.92em;
+  word-break: break-all;
+}
+
+/* ---- Event story per-page toolbar ---- */
+.story-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.story-status { font-size: 13px; color: var(--text-secondary); display: inline-flex; align-items: center; }
+.story-toolbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---- Responsive: tablet / mobile ---- */
+@media (max-width: 768px) {
+  .app { position: relative; }
+
+  /* Sidebar becomes an overlay drawer. */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 84vw;
+    max-width: 320px;
+    z-index: 50;
+    box-shadow: var(--shadow-lg);
+    transition: transform 0.22s ease;
+  }
+  /* Open by default in flow; collapsed slides off-screen. */
+  .app.sidebar-collapsed .sidebar {
+    margin-left: 0;
+    transform: translateX(-100%);
+  }
+
+  /* Dim backdrop behind the open drawer. */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 45;
+  }
+  .app.sidebar-collapsed .sidebar-backdrop { display: none; }
+
+  .main-header { padding: 14px 16px 14px 60px; }
+  .main-header h2 { font-size: 16px; }
+  .search-bar { padding: 10px 16px; }
+  .story-toolbar { padding: 10px 16px; }
+  .proof-panel { margin: 14px 16px; }
+  .entry-table .col-source { width: 56px; }
+  .entry-row .jp, .entry-row .cn { max-width: 46vw; }
+  .entry-table th, .entry-table td { padding: 8px 10px; }
+
+  /* Admin / settings: full width, breathing room around cards. */
+  .admin-body { padding: 16px; }
+  .topnav { padding: 0 12px; overflow-x: auto; }
+  .topnav a { white-space: nowrap; }
+  .card { padding: 16px; }
+
+  /* User-management add row stacks vertically on small screens. */
+  .data-table { display: block; overflow-x: auto; }
+}
+
+@media (max-width: 480px) {
+  .main-header { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .proof-actions { flex-direction: column; align-items: stretch; }
+  .proof-hints { margin-left: 0; }
+}

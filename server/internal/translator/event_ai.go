@@ -146,6 +146,43 @@ func (t *Translator) AITranslateAll(provider string) (AITranslateAllResult, erro
 	return result, nil
 }
 
+// AITranslateStory translates a single event story's untranslated lines via the
+// LLM. Used by the per-story "AI 补充翻译" button in the editor.
+func (t *Translator) AITranslateStory(eventID int, provider string) (AITranslateAllResult, error) {
+	if err := t.markStart("ai-story"); err != nil {
+		return AITranslateAllResult{}, err
+	}
+	var runErr error
+	defer func() { t.markEnd(fmt.Sprintf("ai story %d complete", eventID), runErr) }()
+
+	provider = normalizeProvider(provider, t.cfg.GetOr("llm.type", "openai"))
+	result := AITranslateAllResult{Provider: provider}
+	if provider != "gemini" && provider != "openai" {
+		runErr = fmt.Errorf("unsupported provider: %s", provider)
+		return result, runErr
+	}
+
+	targets, err := t.eventStore.UntranslatedTargets(eventID)
+	if err != nil {
+		runErr = err
+		return result, runErr
+	}
+	if len(targets) == 0 {
+		return result, nil
+	}
+	result.TotalFields = 1
+	result.TotalCandidates = len(targets)
+	count, err := t.translateEventStory(eventID, provider)
+	if err != nil {
+		runErr = err
+		result.Errors++
+		return result, runErr
+	}
+	result.TotalTranslated = count
+	result.TotalSkipped = len(targets) - count
+	return result, nil
+}
+
 // RetryEventStorySync re-fetches one event story from remote, preferring official
 // CN and falling back to JP-pending + auto LLM. Overwrites local non-edited data.
 func (t *Translator) RetryEventStorySync(eventID int) (map[string]any, error) {

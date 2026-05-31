@@ -31,6 +31,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/translate/cn-sync", s.auth.RequireAuth(s.handleCNSync))
 	mux.HandleFunc("/api/translate/ai", s.auth.RequireAuth(s.handleTranslateAI))
 	mux.HandleFunc("/api/translate/ai-all", s.auth.RequireAuth(s.handleTranslateAIAll))
+	mux.HandleFunc("/api/translate/ai-story", s.auth.RequireAuth(s.handleTranslateAIStory))
+
+	// Read-only upstream status for any authenticated user (user settings page).
+	mux.HandleFunc("/api/upstream/status", s.auth.RequireAuth(s.handleUpstreamStatus))
 
 	// Admin (admin role required)
 	mux.HandleFunc("/api/admin/users", s.auth.RequireAdmin(s.handleUsersRouter))

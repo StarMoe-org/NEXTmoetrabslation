@@ -1,12 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTheme } from "next-themes";
 import { useToast } from "@/app/providers";
 import {
   CategoryInfo, EventStorySummary, TranslationEntry,
   clearSession, getCategories, getEntries, getEventStories, getEventStory,
-  getRole, getUsername, runCNSync, triggerAITranslateAll,
+  getRole, getUsername, runCNSync, triggerAIStory,
   updateEntry, updateEventStoryLine, promoteEventStoryHuman, retryEventStory, reorderEventStory,
 } from "@/lib/api";
 import {
@@ -17,10 +16,22 @@ import { useSSE } from "@/lib/sse";
 
 interface Progress { label: string; current: number; total: number }
 
+// localStorage-backed boolean preference. Falls back gracefully on SSR.
+function usePref(key: string, fallback: boolean): [boolean, (v: boolean) => void] {
+  const [value, setValue] = useState(fallback);
+  useEffect(() => {
+    const raw = typeof window !== "undefined" ? localStorage.getItem(key) : null;
+    if (raw != null) setValue(raw === "1");
+  }, [key]);
+  const set = useCallback((v: boolean) => {
+    setValue(v);
+    if (typeof window !== "undefined") localStorage.setItem(key, v ? "1" : "0");
+  }, [key]);
+  return [value, set];
+}
+
 export function Console({ onLogout }: { onLogout: () => void }) {
   const { show } = useToast();
-  const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
 
   const [username] = useState(getUsername());
   const [role] = useState(getRole());
@@ -40,9 +51,18 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   const editRef = useRef<HTMLTextAreaElement>(null);
   const savingRef = useRef(false);
 
-  const isEventStory = category === "eventStory";
+  // ---- UI prefs: sidebar visibility + count-badge visibility ----
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showBadges, setShowBadges] = usePref("ui.showBadges", true);
 
-  useEffect(() => setMounted(true), []);
+  // On first mount, collapse the sidebar by default on narrow screens.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches) {
+      setSidebarOpen(false);
+    }
+  }, []);
+
+  const isEventStory = category === "eventStory";
 
   // ---- Load categories + event stories ----
   const reloadSidebar = useCallback(() => {
@@ -129,6 +149,10 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   // ---- Actions ----
   const selectField = (cat: string, f: string) => {
     setCategory(cat); setField(f); setQuery(""); setSelectedKey(null);
+    // On mobile the sidebar is a drawer; close it after picking.
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches) {
+      setSidebarOpen(false);
+    }
   };
 
   const navigate = useCallback((dir: 1 | -1) => {
@@ -192,22 +216,45 @@ export function Console({ onLogout }: { onLogout: () => void }) {
     catch (e) { show(e instanceof Error ? e.message : "更新失败", "err"); }
   });
 
-  const doAIAll = () => withBusy(async () => {
+  // Per-story AI gap-fill: translate only the currently open event story.
+  const doAIStory = () => withBusy(async () => {
     try {
-      const r = await triggerAITranslateAll("openai") as { totalTranslated?: number; totalCandidates?: number };
-      show(`AI 剧情翻译完成: ${r.totalTranslated ?? 0}/${r.totalCandidates ?? 0}`, "ok");
-      reloadSidebar(); if (isEventStory) loadEntries();
+      const r = await triggerAIStory(Number(field), "openai") as { totalTranslated?: number; totalCandidates?: number };
+      show(`AI 补充翻译完成: ${r.totalTranslated ?? 0}/${r.totalCandidates ?? 0}`, "ok");
+      reloadSidebar(); loadEntries();
     } catch (e) { show(e instanceof Error ? e.message : "AI 翻译失败", "err"); }
   });
 
   const currentField = categories.find((c) => c.name === category)?.fields?.find((f) => f.name === field);
+  const currentStory = isEventStory ? eventStories.find((s) => String(s.eventId) === field) : undefined;
+
+  const appClass = `app${sidebarOpen ? "" : " sidebar-collapsed"}${showBadges ? "" : " badges-hidden"}`;
 
   return (
-    <div className="app">
+    <div className={appClass}>
+      {/* Floating button to reopen the sidebar when collapsed/hidden. */}
+      {!sidebarOpen && (
+        <button className="sidebar-open-btn" onClick={() => setSidebarOpen(true)} aria-label="显示侧边栏" title="显示侧边栏">☰</button>
+      )}
+      {/* Mobile drawer backdrop. */}
+      <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>翻译校对</h1>
-          <span className="sub">{username}{role === "admin" ? " · 管理员" : ""}</span>
+          <div className="sidebar-title-row">
+            <div>
+              <h1>翻译校对</h1>
+              <span className="sub">{username}{role === "admin" ? " · 管理员" : ""}</span>
+            </div>
+            <button className="icon-btn" onClick={() => setSidebarOpen(false)} aria-label="收起侧边栏" title="收起侧边栏">«</button>
+          </div>
+          <button
+            className="btn btn-ghost btn-sm badge-toggle"
+            onClick={() => setShowBadges(!showBadges)}
+            title={showBadges ? "隐藏数量角标" : "显示数量角标"}
+          >
+            {showBadges ? "隐藏数字角标" : "显示数字角标"}
+          </button>
         </div>
 
         <div className="sidebar-scroll">
@@ -244,10 +291,16 @@ export function Console({ onLogout }: { onLogout: () => void }) {
               <div className="field-group-title">活动剧情 ({eventStories.length})</div>
               {eventStories.map((s) => {
                 const active = category === "eventStory" && field === String(s.eventId);
+                const done = s.untranslatedCount === 0;
                 return (
                   <div key={s.eventId} className={`field-item ${active ? "active" : ""}`} onClick={() => selectField("eventStory", String(s.eventId))}>
-                    <span>Event #{s.eventId}</span>
-                    <span className="badge">{s.episodeCount}章</span>
+                    <span>
+                      <span className={`story-dot ${done ? "done" : "pending"}`} title={done ? "已翻译" : "有未翻译内容"} />
+                      Event #{s.eventId}
+                    </span>
+                    {s.untranslatedCount > 0
+                      ? <span className="badge work" title="未翻译条数">{s.untranslatedCount}</span>
+                      : <span className="badge ok" title="已全部翻译">✓</span>}
                   </div>
                 );
               })}
@@ -257,18 +310,10 @@ export function Console({ onLogout }: { onLogout: () => void }) {
 
         <div className="sidebar-footer">
           <button className="btn btn-secondary" onClick={doCNSync} disabled={busy}>数据更新</button>
-          <button className="btn btn-secondary" onClick={doAIAll} disabled={busy}>AI 补充剧情翻译</button>
-          {role === "admin" && <a className="btn btn-ghost" href="/admin">管理设置</a>}
-          {mounted && (
-            <div className="form-row" style={{ margin: 0 }}>
-              <label>主题</label>
-              <select value={theme} onChange={(e) => setTheme(e.target.value)}>
-                <option value="system">跟随系统</option>
-                <option value="light">亮色</option>
-                <option value="dark">深色</option>
-              </select>
-            </div>
-          )}
+          <div className="footer-links">
+            <a className="btn btn-ghost" href="/settings">用户设置</a>
+            {role === "admin" && <a className="btn btn-ghost" href="/admin">管理设置</a>}
+          </div>
           <button className="btn btn-ghost" onClick={() => { clearSession(); onLogout(); }}>退出登录</button>
         </div>
       </aside>
@@ -296,6 +341,24 @@ export function Console({ onLogout }: { onLogout: () => void }) {
                 {currentField && ` （共 ${currentField.total}）`}
               </span>
             </div>
+
+            {/* Per-story toolbar: AI gap-fill + story-level actions live here, on
+                the story page itself (not the global sidebar). */}
+            {isEventStory && (
+              <div className="story-toolbar">
+                <span className="story-status">
+                  {currentStory && currentStory.untranslatedCount > 0
+                    ? <><span className="story-dot pending" /> {currentStory.untranslatedCount} 条未翻译</>
+                    : <><span className="story-dot done" /> 已全部翻译</>}
+                </span>
+                <div className="story-toolbar-actions">
+                  <button className="btn btn-primary btn-sm" onClick={doAIStory} disabled={busy}>AI 补充剧情翻译</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => withBusy(async () => { await promoteEventStoryHuman(Number(field)); setEntries((p) => p.map((e) => ({ ...e, source: "human" }))); reloadSidebar(); show("已整篇标记人工", "ok"); })} disabled={busy}>整篇标记人工</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => withBusy(async () => { await retryEventStory(Number(field)); loadEntries(); reloadSidebar(); show("已重新获取剧情", "ok"); })} disabled={busy}>重新获取剧情</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => withBusy(async () => { await reorderEventStory(Number(field)); loadEntries(); show("已重排序对话", "ok"); })} disabled={busy}>重排序对话</button>
+                </div>
+              </div>
+            )}
 
             <div className="search-bar">
               <input placeholder="搜索日文或中文…" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -330,13 +393,6 @@ export function Console({ onLogout }: { onLogout: () => void }) {
                     <div className="proof-actions">
                       <button className="btn btn-primary" onClick={() => save()}>保存并下一条</button>
                       {!isEventStory && <button className="btn btn-secondary" onClick={() => save("pinned")}>锁定保存</button>}
-                      {isEventStory && (
-                        <>
-                          <button className="btn btn-secondary" onClick={() => withBusy(async () => { await promoteEventStoryHuman(Number(field)); setEntries((p) => p.map((e) => ({ ...e, source: "human" }))); show("已整篇标记人工", "ok"); })} disabled={busy}>整篇标记人工</button>
-                          <button className="btn btn-secondary" onClick={() => withBusy(async () => { await retryEventStory(Number(field)); loadEntries(); show("已重新获取剧情", "ok"); })} disabled={busy}>重新获取剧情</button>
-                          <button className="btn btn-secondary" onClick={() => withBusy(async () => { await reorderEventStory(Number(field)); loadEntries(); show("已重排序对话", "ok"); })} disabled={busy}>重排序对话</button>
-                        </>
-                      )}
                       <div className="proof-hints">
                         <span>保存 <kbd>Shift+Enter</kbd></span>
                         <span><kbd>Ctrl+↑↓</kbd> 切换</span>

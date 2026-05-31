@@ -85,8 +85,9 @@ type EventStoryDetail struct {
 }
 
 type EventStorySummary struct {
-	EventID      int    `json:"eventId"`
-	Source       string `json:"source"`
-	EpisodeCount int    `json:"episodeCount"`
-	LastUpdated  int64  `json:"lastUpdated"`
+	EventID           int    `json:"eventId"`
+	Source            string `json:"source"`
+	EpisodeCount      int    `json:"episodeCount"`
+	UntranslatedCount int    `json:"untranslatedCount"`
+	LastUpdated       int64  `json:"lastUpdated"`
 }

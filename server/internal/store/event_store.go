@@ -202,10 +202,17 @@ func (s *EventStore) Detail(eventID int) (model.EventStoryDetail, error) {
 	return detail, nil
 }
 
-// List returns summaries of all event stories, ordered by event id.
+// List returns summaries of all event stories, ordered by event id. The
+// untranslated count mirrors UntranslatedTargets: talk lines with empty cn_text
+// plus jp-pending titles (non-empty title text whose source is unset/unknown).
 func (s *EventStore) List() ([]model.EventStorySummary, error) {
 	rows, err := s.db.Query(`SELECT es.event_id, es.source, es.last_updated,
-		(SELECT COUNT(*) FROM event_story_episodes e WHERE e.event_id = es.event_id)
+		(SELECT COUNT(*) FROM event_story_episodes e WHERE e.event_id = es.event_id),
+		(SELECT COUNT(*) FROM event_story_lines l
+		   WHERE l.event_id = es.event_id AND l.cn_text = '')
+		+ (SELECT COUNT(*) FROM event_story_episodes e
+		   WHERE e.event_id = es.event_id AND e.title <> ''
+		     AND (e.title_source = '' OR e.title_source = 'unknown' OR e.title_source = 'jp_pending'))
 		FROM event_stories es ORDER BY es.event_id`)
 	if err != nil {
 		return nil, err
@@ -214,7 +221,7 @@ func (s *EventStore) List() ([]model.EventStorySummary, error) {
 	var out []model.EventStorySummary
 	for rows.Next() {
 		var sum model.EventStorySummary
-		if err := rows.Scan(&sum.EventID, &sum.Source, &sum.LastUpdated, &sum.EpisodeCount); err != nil {
+		if err := rows.Scan(&sum.EventID, &sum.Source, &sum.LastUpdated, &sum.EpisodeCount, &sum.UntranslatedCount); err != nil {
 			return nil, err
 		}
 		out = append(out, sum)

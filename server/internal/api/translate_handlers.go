@@ -89,6 +89,38 @@ func (s *Server) handleTranslateAIAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleTranslateAIStory fills one event story's untranslated lines via the LLM.
+//
+// POST /api/translate/ai-story {eventId, provider}
+func (s *Server) handleTranslateAIStory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		EventID  int    `json:"eventId"`
+		Provider string `json:"provider"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.EventID <= 0 {
+		writeErr(w, http.StatusBadRequest, "eventId required")
+		return
+	}
+	result, err := s.translator.AITranslateStory(req.EventID, req.Provider)
+	if err != nil {
+		if translator.IsAlreadyRunning(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcast(sse.EventStoryUpdated, map[string]any{"eventId": req.EventID, "action": "ai-translate"})
+	writeJSON(w, http.StatusOK, result)
+}
+
 // handleRetryEventStory re-fetches one event story from remote.
 //
 // POST /api/event-story/retry {eventId}

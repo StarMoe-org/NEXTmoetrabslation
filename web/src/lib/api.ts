@@ -32,6 +32,7 @@ export interface EventStorySummary {
   eventId: number;
   source: string;
   episodeCount: number;
+  untranslatedCount: number;
   lastUpdated: number;
 }
 
@@ -201,6 +202,8 @@ export const triggerAITranslate = (category: string, field: string, provider: "g
   apiFetch<Record<string, unknown>>("/translate/ai", { method: "POST", body: JSON.stringify({ category, field, provider }) });
 export const triggerAITranslateAll = (provider: "gemini" | "openai") =>
   apiFetch<Record<string, unknown>>("/translate/ai-all", { method: "POST", body: JSON.stringify({ provider }) });
+export const triggerAIStory = (eventId: number, provider: "gemini" | "openai") =>
+  apiFetch<Record<string, unknown>>("/translate/ai-story", { method: "POST", body: JSON.stringify({ eventId, provider }) });
 
 // ---- Admin ----
 
@@ -219,6 +222,9 @@ export const updateSettings = (patch: Record<string, string>) =>
 export const getUpstreamStatus = () => apiFetch<UpstreamStatus>("/admin/upstream");
 export const checkUpstream = (force = false) =>
   apiFetch<UpstreamStatus>("/admin/upstream/check", { method: "POST", body: JSON.stringify({ force }) });
+
+// Read-only upstream status available to any authenticated user (user settings).
+export const getUpstreamStatusPublic = () => apiFetch<UpstreamStatus>("/upstream/status");
 
 export const getBackupStatus = () => apiFetch<BackupStatus>("/backup/status");
 export const pushBackup = () => apiFetch<{ status: string; results: Record<string, string> }>("/backup/push", { method: "POST" });
