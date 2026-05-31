@@ -2,6 +2,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/app/providers";
+import { SettingsModal } from "@/components/SettingsModal";
+import { AdminModal } from "@/components/AdminModal";
 import {
   CategoryInfo, EventStorySummary, TranslationEntry,
   clearSession, getCategories, getEntries, getEventStories, getEventStory,
@@ -68,6 +70,10 @@ export function Console({ onLogout }: { onLogout: () => void }) {
 
   const [username] = useState(getUsername());
   const [role] = useState(getRole());
+
+  // Modal states
+  const [showSettings, setShowSettings] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
   const [categories, setCategories] = useState<CategoryInfo[]>([]);
   const [eventStories, setEventStories] = useState<EventStorySummary[]>([]);
@@ -254,6 +260,29 @@ export function Console({ onLogout }: { onLogout: () => void }) {
     try { await fn(); } finally { setBusy(false); }
   };
 
+  // ---- Change source for a single entry ----
+  const handleSourceChange = useCallback(async (key: string, newSource: string) => {
+    if (!category || !field) return;
+    const entry = entries.find((e) => e.key === key);
+    if (!entry) return;
+    try {
+      if (isEventStory) {
+        const parsed = parseEventStoryEntryKey(key);
+        await updateEventStoryLine(
+          Number(field), parsed.episodeNo,
+          parsed.entryType === "title" ? "" : parsed.originalText,
+          entry.text, newSource, parsed.entryType,
+        );
+      } else {
+        await updateEntry(category, field, key, entry.text, newSource);
+      }
+      setEntries((prev) => prev.map((e) => (e.key === key ? { ...e, source: newSource } : e)));
+      show(`来源已改为「${SOURCE_LABELS[newSource] || newSource}」`, "ok");
+    } catch (err) {
+      show(err instanceof Error ? err.message : "修改失败", "err");
+    }
+  }, [category, field, entries, isEventStory, show]);
+
   // Per-story AI gap-fill: translate only the currently open event story.
   const doAIStory = () => withBusy(async () => {
     try {
@@ -287,8 +316,8 @@ export function Console({ onLogout }: { onLogout: () => void }) {
               <span className="sub">{username}{role === "admin" ? " · 管理员" : ""}</span>
             </div>
             <div className="sidebar-icon-row">
-              <a className="icon-btn" href="/settings" title="用户设置"><IconSettings /></a>
-              {role === "admin" && <a className="icon-btn" href="/admin" title="管理设置"><IconShield /></a>}
+              <button className="icon-btn" onClick={() => setShowSettings(true)} title="用户设置"><IconSettings /></button>
+              {role === "admin" && <button className="icon-btn" onClick={() => setShowAdmin(true)} title="管理设置"><IconShield /></button>}
               <button className="icon-btn" onClick={() => { clearSession(); onLogout(); }} title="退出登录"><IconLogout /></button>
               <button className="icon-btn" onClick={() => setSidebarOpen(false)} aria-label="收起侧边栏" title="收起侧边栏"><IconChevronLeft /></button>
             </div>
@@ -449,7 +478,17 @@ export function Console({ onLogout }: { onLogout: () => void }) {
                         className={`entry-row ${selectedKey === entry.key ? "active" : ""}`}
                         onClick={() => { setSelectedKey(entry.key); setEditValue(entry.text); }}
                       >
-                        <td className="col-source"><span className={`source-tag ${entry.source}`}>{SOURCE_LABELS[entry.source] || entry.source}</span></td>
+                        <td className="col-source" onClick={(e) => e.stopPropagation()}>
+                          <select
+                            value={entry.source}
+                            onChange={(e) => handleSourceChange(entry.key, e.target.value)}
+                            className={`source-tag ${entry.source}`}
+                          >
+                            {Object.entries(SOURCE_LABELS).map(([k, v]) => (
+                              <option key={k} value={k}>{v}</option>
+                            ))}
+                          </select>
+                        </td>
                         <td>
                           <div className="jp">
                             {entry.speakerName && <div className="speaker">{entry.speakerName}</div>}
@@ -466,6 +505,10 @@ export function Console({ onLogout }: { onLogout: () => void }) {
           </>
         )}
       </main>
+
+      {/* Settings & Admin modals */}
+      <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
+      {role === "admin" && <AdminModal open={showAdmin} onClose={() => setShowAdmin(false)} />}
     </div>
   );
 }

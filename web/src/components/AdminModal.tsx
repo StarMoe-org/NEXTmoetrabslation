@@ -2,12 +2,15 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useToast } from "@/app/providers";
+import { Modal } from "@/components/Modal";
 import {
   BackupStatus, UpstreamStatus, User,
-  checkUpstream, createUser, deleteUser, getBackupStatus, getRole, getSettings,
-  getToken, getUpstreamStatus, listUsers, pushBackup, restoreBackup,
+  checkUpstream, createUser, deleteUser, getBackupStatus, getSettings,
+  getUpstreamStatus, listUsers, pushBackup, restoreBackup,
   updateSettings, updateUser,
 } from "@/lib/api";
+
+type ShowFn = (msg: string, type?: "ok" | "err") => void;
 
 // Settings keys grouped for the form (mirror the Go config constants).
 const LLM_KEYS = [
@@ -58,36 +61,12 @@ const SETTING_HINTS: Record<string, React.ReactNode> = {
   ),
 };
 
-export default function AdminPage() {
+export function AdminModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { show } = useToast();
-  const [authorized, setAuthorized] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (!getToken() || getRole() !== "admin") {
-      setAuthorized(false);
-      return;
-    }
-    setAuthorized(true);
-  }, []);
-
-  if (authorized === null) return <div className="center-state" style={{ height: "100vh" }}><div className="spinner" /></div>;
-  if (!authorized) {
-    return (
-      <div className="center-state" style={{ height: "100vh" }}>
-        <p>需要管理员权限</p>
-        <a className="btn btn-secondary" href="/">返回控制台</a>
-      </div>
-    );
-  }
 
   return (
-    <div className="admin-page">
-      <div className="topnav">
-        <a href="/">控制台</a>
-        <a href="/settings">用户设置</a>
-        <a href="/admin" className="active">管理设置</a>
-      </div>
-      <div className="admin-body">
+    <Modal open={open} onClose={onClose} title="管理设置">
+      <div className="modal-cards">
         <UsersCard show={show} />
         <SettingsCard title="LLM 翻译" keys={LLM_KEYS} show={show} />
         <UpstreamCard show={show} />
@@ -95,11 +74,9 @@ export default function AdminPage() {
         <BackupCard show={show} />
         <SettingsCard title="备份配置" keys={BACKUP_KEYS} show={show} />
       </div>
-    </div>
+    </Modal>
   );
 }
-
-type ShowFn = (msg: string, type?: "ok" | "err") => void;
 
 // ---- Users ----
 

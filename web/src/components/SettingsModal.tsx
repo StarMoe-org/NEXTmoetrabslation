@@ -3,48 +3,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { useToast } from "@/app/providers";
+import { Modal } from "@/components/Modal";
 import {
   BackupStatus, CategoryInfo, EventStorySummary, UpstreamStatus,
-  getBackupStatus, getCategories, getEventStories, getRole, getToken,
-  getUpstreamStatusPublic, getUsername, pushBackup, runCNSync,
+  getBackupStatus, getCategories, getEventStories,
+  getUpstreamStatusPublic, getUsername, getRole,
+  pushBackup, runCNSync,
 } from "@/lib/api";
 import { CATEGORY_LABELS, FIELD_LABELS } from "@/lib/labels";
 
-// User settings: preferences (theme, shortcuts, badge filters), account info,
-// data management (sync + backup), and a read-only view of the upstream status.
-// Available to every logged-in user (admin or editor).
-export default function SettingsPage() {
+type ShowFn = (msg: string, type?: "ok" | "err") => void;
+
+export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { show } = useToast();
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-
-  useEffect(() => {
-    if (!getToken()) {
-      setAuthed(false);
-      return;
-    }
-    setIsAdmin(getRole() === "admin");
-    setAuthed(true);
-  }, []);
-
-  if (authed === null) return <div className="center-state" style={{ height: "100vh" }}><div className="spinner" /></div>;
-  if (!authed) {
-    return (
-      <div className="center-state" style={{ height: "100vh" }}>
-        <p>请先登录</p>
-        <a className="btn btn-secondary" href="/">返回控制台</a>
-      </div>
-    );
-  }
 
   return (
-    <div className="admin-page">
-      <div className="topnav">
-        <a href="/">控制台</a>
-        <a href="/settings" className="active">用户设置</a>
-        {isAdmin && <a href="/admin">管理设置</a>}
-      </div>
-      <div className="admin-body">
+    <Modal open={open} onClose={onClose} title="用户设置">
+      <div className="modal-cards">
         <AccountCard />
         <AppearanceCard />
         <ShortcutCard />
@@ -52,11 +27,9 @@ export default function SettingsPage() {
         <DataManagementCard show={show} />
         <UpstreamStatusCard show={show} />
       </div>
-    </div>
+    </Modal>
   );
 }
-
-type ShowFn = (msg: string, type?: "ok" | "err") => void;
 
 // ---- Account ----
 
