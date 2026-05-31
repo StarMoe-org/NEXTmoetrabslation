@@ -672,9 +672,9 @@ kbd {
 
   /* Modal: tighter padding on small screens. */
   .modal-backdrop { padding: 0; }
-  .modal-container { width: 100vw; max-height: 100vh; border-radius: 0; }
-  .modal-header { padding: 14px 16px; }
-  .modal-body { padding: 16px; }
+  .modal-container { width: 100vw; max-height: 100dvh; border-radius: 0; }
+  .modal-header { padding: 14px 16px; flex-shrink: 0; }
+  .modal-body { padding: 16px; min-height: 0; flex: 1; overflow-y: auto; }
 
   /* Admin / settings: full width, breathing room around cards. */
   .admin-body { padding: 16px; }
