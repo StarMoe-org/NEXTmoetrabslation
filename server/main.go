@@ -101,6 +101,14 @@ func main() {
 	mux := http.NewServeMux()
 	apiServer.RegisterRoutes(mux)
 	mux.Handle("/files/", fileService.Handler())
+
+	// /translation/* is a backward-compatible alias for /files/translation/*.
+	// External sites (e.g. pjsk.moe) fetch translation JSON from this path.
+	mux.HandleFunc("/translation/", func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = "/files/translation/" + strings.TrimPrefix(r.URL.Path, "/translation/")
+		fileService.Handler().ServeHTTP(w, r)
+	})
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok"}`)
@@ -123,6 +131,7 @@ func main() {
 	log.Printf("  db:        %s", dbPath)
 	log.Printf("  data dir:  %s", dataDir)
 	log.Printf("  files:     /files/* (public, cacheable)")
+	log.Printf("  compat:    /translation/* (alias for /files/translation/*)")
 	log.Printf("  api:       /api/*   (JWT, no-store)")
 	if serveWeb {
 		log.Printf("  console:   /       (static SPA from %s)", webDir)
@@ -216,8 +225,8 @@ func seedAdminFromEnv(a *auth.Auth) {
 
 func corsMiddleware(next http.Handler, origin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /files/* sets its own permissive CORS; here we scope console API.
-		if !strings.HasPrefix(r.URL.Path, "/files/") {
+		// /files/* and /translation/* set their own permissive CORS; here we scope console API.
+		if !strings.HasPrefix(r.URL.Path, "/files/") && !strings.HasPrefix(r.URL.Path, "/translation/") {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")

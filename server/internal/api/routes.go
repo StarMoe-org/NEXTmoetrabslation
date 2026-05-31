@@ -42,9 +42,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/upstream", s.auth.RequireAdmin(s.handleUpstreamStatus))
 	mux.HandleFunc("/api/admin/upstream/check", s.auth.RequireAdmin(s.handleUpstreamCheck))
 
-	// Backup / restore (admin role required)
-	mux.HandleFunc("/api/backup/status", s.auth.RequireAdmin(s.handleBackupStatus))
-	mux.HandleFunc("/api/backup/push", s.auth.RequireAdmin(s.handleBackupPush))
+	// Backup / restore: status and push available to any authenticated user,
+	// restore restricted to admin (destructive operation).
+	mux.HandleFunc("/api/backup/status", s.auth.RequireAuth(s.handleBackupStatus))
+	mux.HandleFunc("/api/backup/push", s.auth.RequireAuth(s.handleBackupPush))
 	mux.HandleFunc("/api/backup/restore", s.auth.RequireAdmin(s.handleBackupRestore))
 
 	// Realtime: SSE stream (JWT via Authorization header or ?token= query param).

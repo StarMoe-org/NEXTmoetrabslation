@@ -11,6 +11,7 @@ import {
 import {
   CATEGORY_LABELS, FIELD_LABELS, SOURCE_LABELS, SOURCE_ORDER,
   EVENT_STORY_TITLE_MARKER, buildEventStoryEntries, eventStoryEntryLabel, parseEventStoryEntryKey,
+  buildMoesekaiUrl,
 } from "@/lib/labels";
 import { useSSE } from "@/lib/sse";
 
@@ -30,6 +31,38 @@ function usePref(key: string, fallback: boolean): [boolean, (v: boolean) => void
   return [value, set];
 }
 
+// Read a JSON array from localStorage (returns [] on missing / invalid).
+function useHiddenBadges(): Set<string> {
+  const [set] = useState(() => {
+    if (typeof window === "undefined") return new Set<string>();
+    try {
+      const raw = localStorage.getItem("ui.hiddenBadges");
+      return new Set<string>(raw ? JSON.parse(raw) : []);
+    } catch {
+      return new Set<string>();
+    }
+  });
+  return set;
+}
+
+// ---- Inline SVG icons (lucide-style, 24×24 viewBox) ----
+
+const IconSettings = () => (
+  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+);
+const IconShield = () => (
+  <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+);
+const IconLogout = () => (
+  <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+);
+const IconChevronLeft = () => (
+  <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+);
+const IconExternalLink = () => (
+  <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+);
+
 export function Console({ onLogout }: { onLogout: () => void }) {
   const { show } = useToast();
 
@@ -40,7 +73,6 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   const [eventStories, setEventStories] = useState<EventStorySummary[]>([]);
   const [category, setCategory] = useState("");
   const [field, setField] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("");
   const [entries, setEntries] = useState<TranslationEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -51,9 +83,10 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   const editRef = useRef<HTMLTextAreaElement>(null);
   const savingRef = useRef(false);
 
-  // ---- UI prefs: sidebar visibility + count-badge visibility ----
+  // ---- UI prefs ----
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [showBadges, setShowBadges] = usePref("ui.showBadges", true);
+  const [enterSaves, setEnterSaves] = usePref("ui.saveShortcut", false);
+  const hiddenBadges = useHiddenBadges();
 
   // On first mount, collapse the sidebar by default on narrow screens.
   useEffect(() => {
@@ -88,7 +121,7 @@ export function Console({ onLogout }: { onLogout: () => void }) {
         .finally(() => setLoading(false));
       return;
     }
-    getEntries(category, field, sourceFilter || undefined)
+    getEntries(category, field)
       .then((data) => {
         data.sort((a, b) => {
           const d = (SOURCE_ORDER[a.source] ?? 5) - (SOURCE_ORDER[b.source] ?? 5);
@@ -99,7 +132,7 @@ export function Console({ onLogout }: { onLogout: () => void }) {
       })
       .catch((e) => show(e.message, "err"))
       .finally(() => setLoading(false));
-  }, [category, field, sourceFilter, isEventStory, show]);
+  }, [category, field, isEventStory, show]);
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
@@ -110,7 +143,6 @@ export function Console({ onLogout }: { onLogout: () => void }) {
       setProgress({ label: String(d.detail ?? ""), current: Number(d.current ?? 0), total: Number(d.total ?? 0) });
       if (Number(d.current) >= Number(d.total)) setTimeout(() => setProgress(null), 1500);
     } else if (event === "entry.updated") {
-      // Another user edited; reflect it if it's the field we're viewing.
       if (d.category === category && d.field === field && d.user !== username) {
         setEntries((prev) => prev.map((e) => (e.key === d.key ? { ...e, text: String(d.text), source: String(d.source) } : e)));
         show(`${d.user} 修改了一条翻译`, "ok");
@@ -146,10 +178,15 @@ export function Console({ onLogout }: { onLogout: () => void }) {
     }
   }, [selectedKey]);
 
+  // ---- Moesekai URL for the currently selected entry ----
+  const moesekaiUrl = useMemo(() => {
+    if (!selectedEntry || !category || !field) return null;
+    return buildMoesekaiUrl(category, field, selectedEntry.key);
+  }, [selectedEntry, category, field]);
+
   // ---- Actions ----
   const selectField = (cat: string, f: string) => {
     setCategory(cat); setField(f); setQuery(""); setSelectedKey(null);
-    // On mobile the sidebar is a drawer; close it after picking.
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches) {
       setSidebarOpen(false);
     }
@@ -199,8 +236,14 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   }, [selectedKey, category, field, editValue, filtered, isEventStory, show]);
 
   const onTextareaKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); save(); }
-    else if (e.key === "Escape") { setSelectedKey(null); }
+    if (enterSaves) {
+      // Enter = save (Shift+Enter = newline)
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); save(); }
+    } else {
+      // Shift+Enter = save (Enter = newline, default)
+      if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); save(); }
+    }
+    if (e.key === "Escape") { setSelectedKey(null); }
     else if ((e.ctrlKey || e.metaKey) && e.key === "ArrowUp") { e.preventDefault(); navigate(-1); }
     else if ((e.ctrlKey || e.metaKey) && e.key === "ArrowDown") { e.preventDefault(); navigate(1); }
   };
@@ -210,11 +253,6 @@ export function Console({ onLogout }: { onLogout: () => void }) {
     setBusy(true);
     try { await fn(); } finally { setBusy(false); }
   };
-
-  const doCNSync = () => withBusy(async () => {
-    try { await runCNSync(); show("数据更新完成", "ok"); reloadSidebar(); loadEntries(); }
-    catch (e) { show(e instanceof Error ? e.message : "更新失败", "err"); }
-  });
 
   // Per-story AI gap-fill: translate only the currently open event story.
   const doAIStory = () => withBusy(async () => {
@@ -228,7 +266,9 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   const currentField = categories.find((c) => c.name === category)?.fields?.find((f) => f.name === field);
   const currentStory = isEventStory ? eventStories.find((s) => String(s.eventId) === field) : undefined;
 
-  const appClass = `app${sidebarOpen ? "" : " sidebar-collapsed"}${showBadges ? "" : " badges-hidden"}`;
+  const appClass = `app${sidebarOpen ? "" : " sidebar-collapsed"}`;
+
+  const saveKeyLabel = enterSaves ? "Enter" : "Shift+Enter";
 
   return (
     <div className={appClass}>
@@ -246,40 +286,28 @@ export function Console({ onLogout }: { onLogout: () => void }) {
               <h1>翻译校对</h1>
               <span className="sub">{username}{role === "admin" ? " · 管理员" : ""}</span>
             </div>
-            <button className="icon-btn" onClick={() => setSidebarOpen(false)} aria-label="收起侧边栏" title="收起侧边栏">«</button>
+            <div className="sidebar-icon-row">
+              <a className="icon-btn" href="/settings" title="用户设置"><IconSettings /></a>
+              {role === "admin" && <a className="icon-btn" href="/admin" title="管理设置"><IconShield /></a>}
+              <button className="icon-btn" onClick={() => { clearSession(); onLogout(); }} title="退出登录"><IconLogout /></button>
+              <button className="icon-btn" onClick={() => setSidebarOpen(false)} aria-label="收起侧边栏" title="收起侧边栏"><IconChevronLeft /></button>
+            </div>
           </div>
-          <button
-            className="btn btn-ghost btn-sm badge-toggle"
-            onClick={() => setShowBadges(!showBadges)}
-            title={showBadges ? "隐藏数量角标" : "显示数量角标"}
-          >
-            {showBadges ? "隐藏数字角标" : "显示数字角标"}
-          </button>
         </div>
 
         <div className="sidebar-scroll">
-          <div className="form-row" style={{ margin: "4px 6px 12px" }}>
-            <label>来源过滤</label>
-            <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-              <option value="">全部</option>
-              <option value="llm">仅 AI</option>
-              <option value="human">仅人工</option>
-              <option value="pinned">仅锁定</option>
-              <option value="cn">仅官方</option>
-              <option value="unknown">仅未知</option>
-            </select>
-          </div>
-
           {categories.map((cat) => (
             <div className="field-group" key={cat.name}>
               <div className="field-group-title">{CATEGORY_LABELS[cat.name] || cat.name}</div>
               {cat.fields?.map((f) => {
                 const work = f.llmCount + f.unknownCount;
                 const active = category === cat.name && field === f.name;
+                const badgeKey = `${cat.name}:${f.name}`;
+                const hideBadge = hiddenBadges.has(badgeKey);
                 return (
-                  <div key={`${cat.name}-${f.name}`} className={`field-item ${active ? "active" : ""}`} onClick={() => selectField(cat.name, f.name)}>
+                  <div key={badgeKey} className={`field-item ${active ? "active" : ""}`} onClick={() => selectField(cat.name, f.name)}>
                     <span>{FIELD_LABELS[f.name] || f.name}</span>
-                    {work > 0 && <span className="badge work">{work}</span>}
+                    {work > 0 && !hideBadge && <span className="badge work">{work}</span>}
                   </div>
                 );
               })}
@@ -292,29 +320,24 @@ export function Console({ onLogout }: { onLogout: () => void }) {
               {eventStories.map((s) => {
                 const active = category === "eventStory" && field === String(s.eventId);
                 const done = s.untranslatedCount === 0;
+                const badgeKey = `eventStory:${s.eventId}`;
+                const hideBadge = hiddenBadges.has(badgeKey);
                 return (
                   <div key={s.eventId} className={`field-item ${active ? "active" : ""}`} onClick={() => selectField("eventStory", String(s.eventId))}>
                     <span>
                       <span className={`story-dot ${done ? "done" : "pending"}`} title={done ? "已翻译" : "有未翻译内容"} />
                       Event #{s.eventId}
                     </span>
-                    {s.untranslatedCount > 0
-                      ? <span className="badge work" title="未翻译条数">{s.untranslatedCount}</span>
-                      : <span className="badge ok" title="已全部翻译">✓</span>}
+                    {!hideBadge && (
+                      s.untranslatedCount > 0
+                        ? <span className="badge work" title="未翻译条数">{s.untranslatedCount}</span>
+                        : <span className="badge ok" title="已全部翻译">✓</span>
+                    )}
                   </div>
                 );
               })}
             </div>
           )}
-        </div>
-
-        <div className="sidebar-footer">
-          <button className="btn btn-secondary" onClick={doCNSync} disabled={busy}>数据更新</button>
-          <div className="footer-links">
-            <a className="btn btn-ghost" href="/settings">用户设置</a>
-            {role === "admin" && <a className="btn btn-ghost" href="/admin">管理设置</a>}
-          </div>
-          <button className="btn btn-ghost" onClick={() => { clearSession(); onLogout(); }}>退出登录</button>
         </div>
       </aside>
 
@@ -342,8 +365,7 @@ export function Console({ onLogout }: { onLogout: () => void }) {
               </span>
             </div>
 
-            {/* Per-story toolbar: AI gap-fill + story-level actions live here, on
-                the story page itself (not the global sidebar). */}
+            {/* Per-story toolbar */}
             {isEventStory && (
               <div className="story-toolbar">
                 <span className="story-status">
@@ -372,6 +394,11 @@ export function Console({ onLogout }: { onLogout: () => void }) {
                     {selectedEntry.speakerName && <div className="speaker">{selectedEntry.speakerName}</div>}
                     <div className="jp-body">{isEventStory ? eventStoryEntryLabel(selectedEntry.key) : selectedEntry.key}</div>
                     {isEventStory && <div className="episode">第 {parseEventStoryEntryKey(selectedEntry.key).episodeNo} 章</div>}
+                    {moesekaiUrl && (
+                      <a className="moesekai-link" href={moesekaiUrl} target="_blank" rel="noopener noreferrer" title="在 Moesekai 上查看详情">
+                        <IconExternalLink /> Moesekai 页面
+                      </a>
+                    )}
                   </div>
                   <div className="proof-edit">
                     <div className="proof-edit-head">
@@ -393,8 +420,11 @@ export function Console({ onLogout }: { onLogout: () => void }) {
                     <div className="proof-actions">
                       <button className="btn btn-primary" onClick={() => save()}>保存并下一条</button>
                       {!isEventStory && <button className="btn btn-secondary" onClick={() => save("pinned")}>锁定保存</button>}
+                      <button className="btn btn-ghost btn-sm" onClick={() => setEnterSaves(!enterSaves)} title="切换保存快捷键">
+                        快捷键: {saveKeyLabel}
+                      </button>
                       <div className="proof-hints">
-                        <span>保存 <kbd>Shift+Enter</kbd></span>
+                        <span>保存 <kbd>{saveKeyLabel}</kbd></span>
                         <span><kbd>Ctrl+↑↓</kbd> 切换</span>
                       </div>
                     </div>
