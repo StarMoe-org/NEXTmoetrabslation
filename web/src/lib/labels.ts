@@ -45,21 +45,20 @@ export const DETAIL_BUILDERS: Record<string, (id: string) => string> = {
 export const EVENTSTORY_DETAIL = (id: string) => `${SOURCE_BASE}/eventstory/${id}/`;
 
 /**
- * Build a Moesekai detail-page URL for the given category and entry key.
- * For eventStory, the field (eventId) is used directly.
- * For other categories, we try to extract a numeric ID from the jp key.
- * Returns null if no detail page is available for this category/field.
+ * Build a Moesekai detail-page URL for the given category.
+ * For eventStory, the field (eventId) is used directly — ids are not needed.
+ * For other categories, uses the first numeric id from the entry's ids array.
+ * Returns null if no detail page is available.
  */
-export function buildMoesekaiUrl(category: string, field: string, entryKey: string): string | null {
+export function buildMoesekaiUrl(category: string, field: string, ids?: string[]): string | null {
   if (category === "eventStory") {
     return EVENTSTORY_DETAIL(field);
   }
   const builder = DETAIL_BUILDERS[category];
-  if (!builder) return null;
-  // Try to extract a numeric ID from the key (e.g. "3カード" → "3").
-  const m = entryKey.match(/^(\d+)/);
-  if (m) return builder(m[1]);
-  return null;
+  if (!builder || !ids || ids.length === 0) return null;
+  // ids are stored as string representations of the masterdata row id.
+  // Use the first one — all rows sharing this jp key point to the same detail page.
+  return builder(ids[0]);
 }
 
 // ---- Event story entry key encoding (ported from legacy) ----

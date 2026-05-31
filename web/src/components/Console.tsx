@@ -181,7 +181,7 @@ export function Console({ onLogout }: { onLogout: () => void }) {
   // ---- Moesekai URL for the currently selected entry ----
   const moesekaiUrl = useMemo(() => {
     if (!selectedEntry || !category || !field) return null;
-    return buildMoesekaiUrl(category, field, selectedEntry.key);
+    return buildMoesekaiUrl(category, field, selectedEntry.ids);
   }, [selectedEntry, category, field]);
 
   // ---- Actions ----
