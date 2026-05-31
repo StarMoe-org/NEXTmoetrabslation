@@ -44,8 +44,9 @@ COPY --from=web-builder /web/node_modules ./web/node_modules
 COPY --from=web-builder /web/package.json ./web/package.json
 COPY --from=web-builder /web/next.config.ts ./web/next.config.ts
 
-# Nginx reverse proxy config (single entry point on port 80).
-COPY nginx.conf /etc/nginx/http.d/default.conf
+# Nginx reverse proxy config template (rendered at runtime by the entrypoint so
+# the upstream ports follow WEB_PORT / BACKEND_PORT instead of being hardcoded).
+COPY nginx.conf /etc/nginx/nginx.conf.template
 
 # Optional seed translations (used on first run when the DB is empty). This repo
 # ships no translations/ dir, so the entrypoint detects the absent seed and

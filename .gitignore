@@ -1,7 +1,7 @@
 # Go build artifacts (match binary file only, not the server/ directory)
 /server(!/)
 /cmd/**/server
-
+.narrafork
 # Runtime data (SQLite, generated files, embedded git workspace)
 /data/
 data/
