@@ -595,6 +595,7 @@ kbd {
   display: flex;
   flex-direction: column;
   animation: modal-slide-in 0.18s ease;
+  min-height: 0;
 }
 .modal-header {
   display: flex;
@@ -620,6 +621,8 @@ kbd {
 .modal-body {
   overflow-y: auto;
   padding: 24px;
+  min-height: 0;
+  flex: 1;
 }
 .modal-cards .card:last-child { margin-bottom: 0; }
 
