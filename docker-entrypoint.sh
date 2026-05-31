@@ -28,13 +28,15 @@ else
   echo "Database present or no seed; skipping migration."
 fi
 
-# Start the Next.js console in the background.
+# Start the Next.js console in the background. Output goes straight to the
+# container's stdout (inherited from PID 1) so `docker logs` shows it.
 echo "Starting console (Next.js) on :${WEB_PORT}..."
-( cd /app/web && PORT="${WEB_PORT}" BACKEND_ORIGIN="http://localhost:${BACKEND_PORT}" npx next start -p "${WEB_PORT}" 2>&1 | sed -u 's/^/[web] /' ) &
+( cd /app/web && PORT="${WEB_PORT}" BACKEND_ORIGIN="http://localhost:${BACKEND_PORT}" npx next start -p "${WEB_PORT}" ) &
 
-# Start the Go backend in the background.
+# Start the Go backend in the background. Its log lines are already tagged
+# ([http], [translate], [backup], ...) and timestamped.
 echo "Starting backend (Go) on :${BACKEND_PORT}..."
-( PORT="${BACKEND_PORT}" ./moesekai-server 2>&1 | sed -u 's/^/[backend] /' ) &
+( PORT="${BACKEND_PORT}" ./moesekai-server ) &
 
 # Start nginx as the foreground process (reverse proxy on port 80).
 # Its access/error logs go to /dev/stdout and /dev/stderr (see nginx.conf),
