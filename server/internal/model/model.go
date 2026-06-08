@@ -9,10 +9,10 @@ const (
 	SourceUnknown = "unknown"
 )
 
-// SupportedCategories are the 11 flat translation categories (event stories
+// SupportedCategories are the flat translation categories (event stories
 // are handled separately). Order is preserved for stable category listing.
 var SupportedCategories = []string{
-	"cards", "events", "music", "gacha", "virtualLive",
+	"cards", "skills", "events", "information", "music", "gacha", "virtualLive",
 	"sticker", "comic", "mysekai", "costumes", "characters", "units",
 }
 

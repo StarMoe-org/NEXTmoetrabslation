@@ -164,7 +164,9 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 		fn       func() (map[string]store.CNApplyField, error)
 	}{
 		{"cards", t.extractCards},
+		{"skills", t.extractSkills},
 		{"events", t.extractEvents},
+		{"information", t.extractInformation},
 		{"gacha", t.extractGacha},
 		{"virtualLive", t.extractVirtualLive},
 		{"sticker", t.extractStickers},

@@ -2,6 +2,8 @@ package translator
 
 import "moesekai/server/internal/store"
 
+const jpInformationURL = "https://baijing.exmeaning.com/jp/information"
+
 // extractResult is the per-category output: field -> {pairs, trace}.
 type extractResult map[string]store.CNApplyField
 
@@ -52,6 +54,45 @@ func (t *Translator) extractCards() (map[string]store.CNApplyField, error) {
 			tm.add("gachaPhrase", phrase, id)
 			collectPair(out["gachaPhrase"].Pairs, phrase, getString(cnItem, "gachaPhrase"))
 		}
+	}
+	return out.withTrace(tm), nil
+}
+
+func (t *Translator) extractSkills() (map[string]store.CNApplyField, error) {
+	jp, err := t.fetchMasterdata("skills.json", "jp")
+	if err != nil {
+		return nil, err
+	}
+	cn, err := t.fetchMasterdata("skills.json", "cn")
+	if err != nil {
+		return nil, err
+	}
+	cnByID := byIntID(cn, "id")
+	out := newExtractResult("description")
+	tm := newTraceMap("description")
+	for _, item := range jp {
+		id := getInt(item, "id")
+		cnItem := cnByID[id]
+		jpDesc := getString(item, "description")
+		tm.add("description", jpDesc, id)
+		collectPair(out["description"].Pairs, jpDesc, getString(cnItem, "description"))
+	}
+	return out.withTrace(tm), nil
+}
+
+func (t *Translator) extractInformation() (map[string]store.CNApplyField, error) {
+	raw, err := t.fetchJSONURL(jpInformationURL)
+	if err != nil {
+		return nil, err
+	}
+	items := toMapSlice(asMap(raw)["informations"])
+	out := newExtractResult("title")
+	tm := newTraceMap("title")
+	for _, item := range items {
+		id := getInt(item, "id")
+		title := safeText(getString(item, "title"))
+		tm.add("title", title, id)
+		collectPair(out["title"].Pairs, title, "")
 	}
 	return out.withTrace(tm), nil
 }

@@ -3,14 +3,14 @@ import type { EventStoryDetail, TranslationEntry } from "./api";
 // ---- Display labels (ported from the legacy client) ----
 
 export const CATEGORY_LABELS: Record<string, string> = {
-  cards: "卡牌", events: "活动", music: "音乐", gacha: "卡池",
+  cards: "卡牌", skills: "技能", events: "活动", information: "公告", music: "音乐", gacha: "卡池",
   virtualLive: "虚拟Live", sticker: "贴纸", comic: "漫画",
   mysekai: "我的世界", costumes: "服装", characters: "角色", units: "团体",
   eventStory: "活动剧情",
 };
 
 export const FIELD_LABELS: Record<string, string> = {
-  prefix: "卡面名称", skillName: "技能名", gachaPhrase: "抽卡台词",
+  prefix: "卡面名称", skillName: "技能名", description: "描述", gachaPhrase: "抽卡台词",
   name: "名称", title: "标题", artist: "音乐人", vocalCaption: "歌手名",
   fixtureName: "家具名", flavorText: "描述文本", genre: "分类", tag: "标签",
   colorName: "配色名", designer: "设计师", hobby: "爱好", specialSkill: "特技",
