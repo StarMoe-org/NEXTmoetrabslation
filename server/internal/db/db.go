@@ -15,15 +15,28 @@ type DB struct {
 // Open opens (or creates) the SQLite database at path and applies the schema.
 // modernc.org/sqlite is a pure-Go driver, so no CGO is required.
 func Open(path string) (*DB, error) {
-	// _pragma options: WAL for concurrent readers during writes, busy_timeout
-	// to avoid "database is locked" under the SSE + background-task load.
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
+	// WAL lets many readers run concurrently with a single writer, which is the
+	// whole point of using it here: background jobs (cn-sync, AI translate,
+	// backup) hold long write transactions while editors keep reading. For that
+	// concurrency to actually happen the pool must allow more than one
+	// connection — capping it at 1 serializes every query behind the current
+	// writer and turns sync windows into multi-minute stalls.
+	//
+	// _txlock=immediate makes write transactions begin with BEGIN IMMEDIATE so
+	// they take the write lock up front and queue on busy_timeout instead of
+	// deadlocking on lock upgrade (the classic multi-writer SQLITE_BUSY trap).
+	// busy_timeout is raised to 10s to ride out the longest cn-sync commits.
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// SQLite handles one writer at a time; cap connections to keep WAL sane.
-	sqlDB.SetMaxOpenConns(1)
+	// Allow concurrent readers alongside the single writer (WAL's design). One
+	// writer at a time is enforced by SQLite itself + BEGIN IMMEDIATE, not by
+	// starving the pool.
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxIdleConns(8)
+	sqlDB.SetConnMaxLifetime(0)
 	if err := sqlDB.Ping(); err != nil {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
