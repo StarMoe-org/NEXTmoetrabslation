@@ -15,11 +15,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"moesekai/server/internal/config"
+)
+
+const (
+	defaultPollInterval      = time.Hour
+	defaultRateLimitCooldown = time.Hour
+	maxRetryAfterCooldown    = 24 * time.Hour
+	maxFallbackCooldown      = 6 * time.Hour
 )
 
 // VersionInfo is the subset of current_version.json we care about.
@@ -37,11 +45,13 @@ type Status struct {
 	Enabled          bool   `json:"enabled"`
 	Repo             string `json:"repo"`
 	Branch           string `json:"branch"`
+	VersionURL       string `json:"versionURL,omitempty"`
 	LastCheck        string `json:"lastCheck,omitempty"`
 	LastDataVersion  string `json:"lastDataVersion,omitempty"`
 	ChangeDetectedAt string `json:"changeDetectedAt,omitempty"`
 	LastSync         string `json:"lastSync,omitempty"`
 	LastError        string `json:"lastError,omitempty"`
+	RateLimitedUntil string `json:"rateLimitedUntil,omitempty"`
 	GitMirrorReady   bool   `json:"gitMirrorReady"`
 }
 
@@ -54,15 +64,20 @@ type Watcher struct {
 	gitDir   string // local clone path; empty disables the git mirror
 	useGit   bool
 
-	mu     sync.Mutex
-	status Status
+	checkMu          sync.Mutex
+	mu               sync.Mutex
+	status           Status
+	etag             string
+	lastModified     string
+	cachedVersion    VersionInfo
+	rateLimitedUntil time.Time
 
 	stopCh chan struct{}
 }
 
 // Options configures the watcher.
 type Options struct {
-	Interval time.Duration // poll interval (default 5m)
+	Interval time.Duration // poll interval (default 1h)
 	GitDir   string        // local masterdata clone dir; "" disables git mirror
 	UseGit   bool          // whether to maintain the git mirror
 }
@@ -70,7 +85,7 @@ type Options struct {
 func New(cfg *config.Config, syncFn SyncFn, opts Options) *Watcher {
 	interval := opts.Interval
 	if interval <= 0 {
-		interval = 5 * time.Minute
+		interval = defaultPollInterval
 	}
 	return &Watcher{
 		cfg:      cfg,
@@ -83,11 +98,21 @@ func New(cfg *config.Config, syncFn SyncFn, opts Options) *Watcher {
 	}
 }
 
-// rawVersionURL builds the raw current_version.json URL for the configured repo.
-func (w *Watcher) rawVersionURL() string {
+// versionURL builds the current_version.json URL for the configured repo.
+func (w *Watcher) versionURL() string {
 	repo := w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
 	branch := w.cfg.GetOr(config.KeyUpstreamBranch, "main")
-	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/versions/current_version.json", repo, branch)
+	return expandVersionURL(w.cfg.Get(config.KeyUpstreamVersionURL), repo, branch)
+}
+
+func expandVersionURL(tmpl, repo, branch string) string {
+	tmpl = strings.TrimSpace(tmpl)
+	if tmpl == "" {
+		return "https://sekaimaster.exmeaning.com/versions/current_version.json"
+	}
+	tmpl = strings.ReplaceAll(tmpl, "{repo}", repo)
+	tmpl = strings.ReplaceAll(tmpl, "{branch}", branch)
+	return tmpl
 }
 
 // Start launches the polling loop unless disabled in config.
@@ -101,6 +126,7 @@ func (w *Watcher) Start() {
 		s.Enabled = true
 		s.Repo = w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
 		s.Branch = w.cfg.GetOr(config.KeyUpstreamBranch, "main")
+		s.VersionURL = w.versionURL()
 	})
 	if w.useGit {
 		go w.ensureGitMirror()
@@ -169,11 +195,15 @@ func (w *Watcher) check(baseline bool) {
 // fetchAndCompare fetches the version file and updates status, returning whether
 // dataVersion changed since the last observed value.
 func (w *Watcher) fetchAndCompare() (bool, error) {
+	w.checkMu.Lock()
+	defer w.checkMu.Unlock()
+
 	info, err := w.fetchVersion()
 	if err != nil {
 		w.setStatus(func(s *Status) {
 			s.LastCheck = nowRFC3339()
 			s.LastError = err.Error()
+			s.VersionURL = w.versionURL()
 		})
 		return false, err
 	}
@@ -181,6 +211,7 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 	w.setStatus(func(s *Status) {
 		s.LastCheck = nowRFC3339()
 		s.LastError = ""
+		s.VersionURL = w.versionURL()
 		if s.LastDataVersion != "" && s.LastDataVersion != info.DataVersion {
 			changed = true
 			s.ChangeDetectedAt = nowRFC3339()
@@ -195,16 +226,45 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 
 func (w *Watcher) fetchVersion() (VersionInfo, error) {
 	var info VersionInfo
-	req, err := http.NewRequest(http.MethodGet, w.rawVersionURL(), nil)
+	now := time.Now()
+	etag, lastModified, cached, rateLimitedUntil := w.fetchState()
+	if !rateLimitedUntil.IsZero() {
+		if now.Before(rateLimitedUntil) {
+			return info, fmt.Errorf("version fetch paused after GitHub HTTP 429; retry after %s", rateLimitedUntil.UTC().Format(time.RFC3339))
+		}
+		w.clearRateLimit()
+	}
+
+	req, err := http.NewRequest(http.MethodGet, w.versionURL(), nil)
 	if err != nil {
 		return info, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "moesekai-upstream-watcher")
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
 		return info, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified {
+		if cached.DataVersion == "" {
+			return info, fmt.Errorf("version fetch http 304 but no cached dataVersion")
+		}
+		w.updateValidators(resp, cached)
+		return cached, nil
+	}
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			until := now.Add(rateLimitCooldown(resp.Header.Get("Retry-After"), now, w.interval))
+			w.setRateLimit(until)
+			return info, fmt.Errorf("version fetch http 429: version source rate limited; retry after %s", until.UTC().Format(time.RFC3339))
+		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return info, fmt.Errorf("version fetch http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -214,7 +274,80 @@ func (w *Watcher) fetchVersion() (VersionInfo, error) {
 	if info.DataVersion == "" {
 		return info, fmt.Errorf("current_version.json missing dataVersion")
 	}
+	w.updateValidators(resp, info)
 	return info, nil
+}
+
+func (w *Watcher) fetchState() (etag, lastModified string, cached VersionInfo, rateLimitedUntil time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.etag, w.lastModified, w.cachedVersion, w.rateLimitedUntil
+}
+
+func (w *Watcher) updateValidators(resp *http.Response, info VersionInfo) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.cachedVersion = info
+	if etag := resp.Header.Get("ETag"); etag != "" || resp.StatusCode == http.StatusOK {
+		w.etag = etag
+	}
+	if lastModified := resp.Header.Get("Last-Modified"); lastModified != "" || resp.StatusCode == http.StatusOK {
+		w.lastModified = lastModified
+	}
+	w.rateLimitedUntil = time.Time{}
+	w.status.RateLimitedUntil = ""
+}
+
+func (w *Watcher) setRateLimit(until time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rateLimitedUntil = until
+	w.status.RateLimitedUntil = until.UTC().Format(time.RFC3339)
+}
+
+func (w *Watcher) clearRateLimit() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rateLimitedUntil = time.Time{}
+	w.status.RateLimitedUntil = ""
+}
+
+func rateLimitCooldown(retryAfter string, now time.Time, interval time.Duration) time.Duration {
+	if d := parseRetryAfter(retryAfter, now); d > 0 {
+		if d > maxRetryAfterCooldown {
+			return maxRetryAfterCooldown
+		}
+		return d
+	}
+	d := interval * 2
+	if d < defaultRateLimitCooldown {
+		d = defaultRateLimitCooldown
+	}
+	if d > maxFallbackCooldown {
+		d = maxFallbackCooldown
+	}
+	return d
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	t, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	if d := t.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // runSync refreshes the git mirror (if enabled) then runs the CN sync.

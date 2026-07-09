@@ -27,6 +27,7 @@ const LLM_KEYS = [
 const UPSTREAM_KEYS = [
   ["upstream.repo", "上游仓库 (owner/repo)"],
   ["upstream.branch", "上游分支"],
+  ["upstream.version_url", "版本检测 URL"],
   ["scheduler.enabled", "启用自动检测 (true/false)"],
 ] as const;
 
@@ -202,9 +203,11 @@ function UpstreamCard({ show }: { show: ShowFn }) {
         <table className="data-table" style={{ marginBottom: 12 }}>
           <tbody>
             <tr><th>仓库</th><td>{status.repo}@{status.branch}</td></tr>
+            <tr><th>检测源</th><td>{status.versionURL || "—"}</td></tr>
             <tr><th>当前 dataVersion</th><td>{status.lastDataVersion || "—"}</td></tr>
             <tr><th>上次检查</th><td>{status.lastCheck || "—"}</td></tr>
             <tr><th>上次同步</th><td>{status.lastSync || "—"}</td></tr>
+            {status.rateLimitedUntil && <tr><th>限流冷却</th><td>{status.rateLimitedUntil}</td></tr>}
             <tr><th>Git 镜像</th><td>{status.gitMirrorReady ? "就绪" : "未启用"}</td></tr>
             {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}</td></tr>}
           </tbody>

@@ -32,9 +32,10 @@ const (
 	KeyBatchSize     = "translate.batch_size"
 	KeyRateDelayMS   = "translate.rate_delay_ms"
 
-	KeyUpstreamRepo   = "upstream.repo"   // e.g. Team-Haruki/haruki-sekai-master
-	KeyUpstreamBranch = "upstream.branch" // e.g. main
-	KeySchedulerOn    = "scheduler.enabled"
+	KeyUpstreamRepo       = "upstream.repo"   // e.g. Team-Haruki/haruki-sekai-master
+	KeyUpstreamBranch     = "upstream.branch" // e.g. main
+	KeyUpstreamVersionURL = "upstream.version_url"
+	KeySchedulerOn        = "scheduler.enabled"
 
 	KeyBackupS3Enabled   = "backup.s3.enabled"
 	KeyBackupS3Endpoint  = "backup.s3.endpoint"

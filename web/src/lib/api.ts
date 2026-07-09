@@ -74,11 +74,13 @@ export interface UpstreamStatus {
   enabled: boolean;
   repo?: string;
   branch?: string;
+  versionURL?: string;
   lastCheck?: string;
   lastDataVersion?: string;
   changeDetectedAt?: string;
   lastSync?: string;
   lastError?: string;
+  rateLimitedUntil?: string;
   gitMirrorReady?: boolean;
 }
 

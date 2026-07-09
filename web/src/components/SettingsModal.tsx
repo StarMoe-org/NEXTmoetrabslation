@@ -290,9 +290,11 @@ function UpstreamStatusCard({ show }: { show: ShowFn }) {
           <tbody>
             <tr><th>启用</th><td>{status.enabled ? "是" : "否"}</td></tr>
             <tr><th>仓库</th><td>{status.repo ? `${status.repo}@${status.branch}` : "—"}</td></tr>
+            <tr><th>检测源</th><td>{status.versionURL || "—"}</td></tr>
             <tr><th>当前 dataVersion</th><td>{status.lastDataVersion || "—"}</td></tr>
             <tr><th>上次检查</th><td>{status.lastCheck || "—"}</td></tr>
             <tr><th>上次同步</th><td>{status.lastSync || "—"}</td></tr>
+            {status.rateLimitedUntil && <tr><th>限流冷却</th><td>{status.rateLimitedUntil}</td></tr>}
             {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}</td></tr>}
           </tbody>
         </table>

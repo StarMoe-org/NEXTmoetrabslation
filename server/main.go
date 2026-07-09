@@ -79,14 +79,14 @@ func main() {
 		hub.Broadcast(stage, map[string]any{"detail": detail, "current": cur, "total": total})
 	})
 
-	// Upstream watcher: polls current_version.json (no GitHub API rate limit),
-	// optionally keeps a local masterdata git mirror, triggers CN sync on change.
+	// Upstream watcher: polls current_version.json directly (not GitHub REST API),
+	// backs off on raw-content 429s, and triggers CN sync on change.
 	useGit := envOr("UPSTREAM_USE_GIT", "false") == "true"
 	watcher := upstream.New(cfg, func() error {
 		_, err := tr.SyncCNOnly()
 		return err
 	}, upstream.Options{
-		Interval: parseDurMs(envOr("UPSTREAM_POLL_MS", "300000")),
+		Interval: parseDurMs(envOr("UPSTREAM_POLL_MS", "3600000")),
 		GitDir:   filepath.Join(dataDir, "masterdata-mirror"),
 		UseGit:   useGit,
 	})
@@ -150,22 +150,23 @@ func main() {
 // admin UI authoritative thereafter.
 func seedConfigFromEnv(cfg *config.Config) {
 	seed := map[string]string{
-		config.KeyLLMType:           os.Getenv("LLM_TYPE"),
-		config.KeyGeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
-		config.KeyGeminiModel:       os.Getenv("GEMINI_MODEL"),
-		config.KeyOpenAIAPIKey:      os.Getenv("OPENAI_API_KEY"),
-		config.KeyOpenAIBaseURL:     os.Getenv("OPENAI_BASE_URL"),
-		config.KeyOpenAIModel:       os.Getenv("OPENAI_MODEL"),
-		config.KeyUpstreamRepo:      envOr("UPSTREAM_REPO", "Team-Haruki/haruki-sekai-master"),
-		config.KeyUpstreamBranch:    envOr("UPSTREAM_BRANCH", "main"),
-		config.KeySchedulerOn:       envOr("TRANSLATE_SCHEDULER_ENABLED", "true"),
-		config.KeyBackupGitRepoURL:  os.Getenv("GIT_PUSH_REPO_URL"),
-		config.KeyBackupGitBranch:   envOr("GIT_PUSH_BRANCH", "backup-translations"),
-		config.KeyBackupS3Bucket:    os.Getenv("BACKUP_S3_BUCKET"),
-		config.KeyBackupS3Region:    os.Getenv("BACKUP_S3_REGION"),
-		config.KeyBackupS3Endpoint:  os.Getenv("BACKUP_S3_ENDPOINT"),
-		config.KeyBackupS3AccessKey: os.Getenv("BACKUP_S3_ACCESS_KEY"),
-		config.KeyBackupS3SecretKey: os.Getenv("BACKUP_S3_SECRET_KEY"),
+		config.KeyLLMType:            os.Getenv("LLM_TYPE"),
+		config.KeyGeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
+		config.KeyGeminiModel:        os.Getenv("GEMINI_MODEL"),
+		config.KeyOpenAIAPIKey:       os.Getenv("OPENAI_API_KEY"),
+		config.KeyOpenAIBaseURL:      os.Getenv("OPENAI_BASE_URL"),
+		config.KeyOpenAIModel:        os.Getenv("OPENAI_MODEL"),
+		config.KeyUpstreamRepo:       envOr("UPSTREAM_REPO", "Team-Haruki/haruki-sekai-master"),
+		config.KeyUpstreamBranch:     envOr("UPSTREAM_BRANCH", "main"),
+		config.KeyUpstreamVersionURL: os.Getenv("UPSTREAM_VERSION_URL"),
+		config.KeySchedulerOn:        envOr("TRANSLATE_SCHEDULER_ENABLED", "true"),
+		config.KeyBackupGitRepoURL:   os.Getenv("GIT_PUSH_REPO_URL"),
+		config.KeyBackupGitBranch:    envOr("GIT_PUSH_BRANCH", "backup-translations"),
+		config.KeyBackupS3Bucket:     os.Getenv("BACKUP_S3_BUCKET"),
+		config.KeyBackupS3Region:     os.Getenv("BACKUP_S3_REGION"),
+		config.KeyBackupS3Endpoint:   os.Getenv("BACKUP_S3_ENDPOINT"),
+		config.KeyBackupS3AccessKey:  os.Getenv("BACKUP_S3_ACCESS_KEY"),
+		config.KeyBackupS3SecretKey:  os.Getenv("BACKUP_S3_SECRET_KEY"),
 	}
 	seeded := 0
 	for k, v := range seed {
