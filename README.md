@@ -54,7 +54,7 @@ v2/
 
 ## 更新检测
 
-默认轮询 `https://sekaimaster.exmeaning.com/versions/current_version.json` 的 `dataVersion`（不走 GitHub raw / REST API）。变化时触发 CN 同步。也可通过 `UPSTREAM_VERSION_URL` / `upstream.version_url` 指向自己的 CDN 或 `https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json`；watcher 会按 `Retry-After` 或本地退避自动冷却 429。可选维护本地 git 镜像（`UPSTREAM_USE_GIT=true`）。
+默认轮询 `https://metadata.pjsk.moe/jp/versions/current_version.json` 的 `dataVersion`（不走 GitHub raw / REST API）。变化时触发 CN 同步；同步 masterdata 默认使用 `https://metadata.pjsk.moe/{jp|cn}/master/`。也可通过 `UPSTREAM_VERSION_URL` / `upstream.version_url` 指向自己的 CDN 或 `https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json`；watcher 会按 `Retry-After` 或本地退避自动冷却 429。可选维护本地 git 镜像（`UPSTREAM_USE_GIT=true`）。
 
 ## 备份 / 恢复
 

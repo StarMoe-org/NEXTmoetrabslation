@@ -19,9 +19,9 @@ import (
 	"moesekai/server/internal/store"
 )
 
-// Masterdata mirror base URLs (same hosts as the legacy backend).
+// Masterdata mirror base URLs.
 const (
-	jpMasterdataURL = "https://sekaimaster.exmeaning.com/master"
+	jpMasterdataURL = "https://metadata.pjsk.moe/jp/master"
 )
 
 type Entry struct {

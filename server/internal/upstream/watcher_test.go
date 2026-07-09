@@ -39,7 +39,7 @@ func TestRateLimitCooldownCapsFallback(t *testing.T) {
 
 func TestExpandVersionURLDefaultsToMirror(t *testing.T) {
 	got := expandVersionURL("", "owner/repo", "main")
-	want := "https://sekaimaster.exmeaning.com/versions/current_version.json"
+	want := "https://metadata.pjsk.moe/jp/versions/current_version.json"
 	if got != want {
 		t.Fatalf("expandVersionURL default = %q, want %q", got, want)
 	}

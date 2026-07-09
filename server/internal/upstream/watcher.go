@@ -108,7 +108,7 @@ func (w *Watcher) versionURL() string {
 func expandVersionURL(tmpl, repo, branch string) string {
 	tmpl = strings.TrimSpace(tmpl)
 	if tmpl == "" {
-		return "https://sekaimaster.exmeaning.com/versions/current_version.json"
+		return "https://metadata.pjsk.moe/jp/versions/current_version.json"
 	}
 	tmpl = strings.ReplaceAll(tmpl, "{repo}", repo)
 	tmpl = strings.ReplaceAll(tmpl, "{branch}", branch)

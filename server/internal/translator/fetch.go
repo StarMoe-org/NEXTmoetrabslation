@@ -15,10 +15,10 @@ import (
 	"time"
 )
 
-// Mirror endpoints (same hosts as the legacy backend).
+// Mirror endpoints.
 const (
-	jpMasterdataURL     = "https://sekaimaster.exmeaning.com/master"
-	cnMasterdataURL     = "https://sekaimaster-cn.exmeaning.com/master"
+	jpMasterdataURL     = "https://metadata.pjsk.moe/jp/master"
+	cnMasterdataURL     = "https://metadata.pjsk.moe/cn/master"
 	jpAssetsURL         = "https://snowyassets.exmeaning.com/ondemand"
 	jpAssetsFallbackURL = "https://assets.unipjsk.com/ondemand"
 	cnAssetsURL         = "https://sekai-assets-bdf29c81.seiunx.net/cn-assets/ondemand"
