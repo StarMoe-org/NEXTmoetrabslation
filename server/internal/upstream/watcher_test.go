@@ -1,9 +1,29 @@
 package upstream
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"moesekai/server/internal/config"
+	"moesekai/server/internal/db"
 )
+
+func openWatcherConfig(t *testing.T) *config.Config {
+	t.Helper()
+	database, err := db.Open(t.TempDir() + "/watcher.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	cfg, err := config.New(database, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
 
 func TestParseRetryAfterSeconds(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
@@ -50,5 +70,61 @@ func TestExpandVersionURLTemplate(t *testing.T) {
 	want := "https://cdn.jsdelivr.net/gh/owner/repo@dev/versions/current_version.json"
 	if got != want {
 		t.Fatalf("expandVersionURL template = %q, want %q", got, want)
+	}
+}
+
+func TestFetchVersionFallsBackToSecondarySource(t *testing.T) {
+	primaryCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer primary.Close()
+
+	fallbackCalls := 0
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"appVersion":"1","dataVersion":"2","assetVersion":"3"}`)
+	}))
+	defer fallback.Close()
+
+	cfg := openWatcherConfig(t)
+	if err := cfg.Set(config.KeyUpstreamVersionURL, primary.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Set(config.KeyUpstreamVersionFallbackURL, fallback.URL); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, Options{})
+
+	info, source, err := w.fetchVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.DataVersion != "2" || source != fallback.URL {
+		t.Fatalf("unexpected fallback result: info=%+v source=%q", info, source)
+	}
+	if primaryCalls != 1 || fallbackCalls != 1 {
+		t.Fatalf("unexpected calls: primary=%d fallback=%d", primaryCalls, fallbackCalls)
+	}
+}
+
+func TestRecordSyncSuccessClearsStaleError(t *testing.T) {
+	cfg := openWatcherConfig(t)
+	w := New(cfg, nil, Options{})
+	w.setStatus(func(s *Status) {
+		s.LastError = "old timeout"
+		s.LastErrorAt = "old"
+		s.ConsecutiveFailures = 2
+	})
+
+	w.RecordSyncResult(nil)
+	status := w.Status()
+	if status.LastError != "" || status.LastErrorAt != "" || status.ConsecutiveFailures != 0 {
+		t.Fatalf("stale error was not cleared: %+v", status)
+	}
+	if status.LastSync == "" || status.LastSuccess == "" {
+		t.Fatalf("sync timestamps not recorded: %+v", status)
 	}
 }

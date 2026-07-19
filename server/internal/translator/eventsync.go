@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"moesekai/server/internal/model"
@@ -60,18 +61,18 @@ func atoiSafe(s string) int {
 // syncEventStoriesCNOnly mirrors the legacy strategy: walk JP stories from the
 // first not-yet-official event, write official CN where available, and on a
 // 3-event empty streak fall back to JP-pending + auto LLM for newer events.
-func (t *Translator) syncEventStoriesCNOnly() (int, error) {
+func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) (int, int, error) {
 	jpStories, err := t.fetchMasterdata("eventStories.json", "jp")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	cnStories, err := t.fetchMasterdata("eventStories.json", "cn")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	cnEvents, err := t.fetchMasterdata("events.json", "cn")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	cnStoryByEvent := byIntID(cnStories, "eventId")
 	cnEventSet := map[int]bool{}
@@ -84,7 +85,7 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 
 	states, localMax, err := t.eventStore.EventSyncStates()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	latestOfficialCN, firstLLM := 0, 0
 	for _, st := range states {
@@ -103,6 +104,7 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 	}
 
 	processed := 0
+	scenarioFailures := 0
 	emptyStreak := 0
 	stoppedByEmpty := false
 	lastChecked := 0
@@ -127,8 +129,11 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 			continue
 		}
 
+		t.setNote(fmt.Sprintf("cn-sync event story %d", eventID))
+		t.emit("sync.progress", fmt.Sprintf("正在更新活动剧情 Event #%d", eventID), progressCurrent, progressTotal)
 		episodes, hasTalk, _, errs := t.buildOfficialCNEpisodes(jpStory, cnStoryByEvent[eventID])
 		if errs > 0 {
+			scenarioFailures += errs
 			continue // scenario fetch failed; retry next round
 		}
 		if !hasTalk {
@@ -143,7 +148,7 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 
 		meta := model.EventStoryMeta{Source: "official_cn", Version: "1.0", LastUpdated: time.Now().Unix()}
 		if err := t.eventStore.ImportOrdered(eventID, meta, toOrderedEpisodes(episodes, "cn")); err != nil {
-			return processed, err
+			return processed, scenarioFailures, err
 		}
 		states[eventID] = store.EventSyncState{EventID: eventID, Source: "official_cn", IsOfficialCN: true}
 		if eventID > localMax {
@@ -155,13 +160,14 @@ func (t *Translator) syncEventStoriesCNOnly() (int, error) {
 	if stoppedByEmpty {
 		fallbackStart := localMax + 1
 		log.Printf("[translate] event stories: CN empty streak at event %d, JP-pending fallback from %d", lastChecked, fallbackStart)
-		fp, err := t.fillEventStoriesJPPending(jpStories, fallbackStart, states)
+		fp, fetchFailures, err := t.fillEventStoriesJPPending(jpStories, fallbackStart, states, progressCurrent, progressTotal)
 		if err != nil {
-			return processed, err
+			return processed, scenarioFailures, err
 		}
 		processed += fp
+		scenarioFailures += fetchFailures
 	}
-	return processed, nil
+	return processed, scenarioFailures, nil
 }
 
 // buildOfficialCNEpisodes fetches JP + CN scenarios and pairs JP text to CN
@@ -173,24 +179,61 @@ func (t *Translator) buildOfficialCNEpisodes(jpStory, cnStory map[string]any) (m
 
 	episodes := map[string]builtEpisode{}
 	hasTalk, hasTitleOnly, errs := false, false, 0
+	type fetchResult struct {
+		ep         map[string]any
+		epNo       int
+		scenarioID string
+		jpScenario any
+		cnScenario any
+		err        error
+	}
+	jobs := make(chan map[string]any)
+	results := make(chan fetchResult, len(jpEpisodes))
+	workers := t.fetchConcurrency()
+	if workers > len(jpEpisodes) {
+		workers = len(jpEpisodes)
+	}
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ep := range jobs {
+				epNo := getInt(ep, "episodeNo")
+				scenarioID := getString(ep, "scenarioId")
+				if scenarioID == "" {
+					continue
+				}
+				scenarioPath := fmt.Sprintf("event_story/%s/scenario/%s", asset, scenarioID)
+				jpScenario, err := t.fetchJPScenarioJSON(scenarioPath)
+				if err != nil {
+					results <- fetchResult{ep: ep, epNo: epNo, scenarioID: scenarioID, err: err}
+					continue
+				}
+				cnScenario, err := t.fetchCNScenarioJSON(scenarioPath)
+				results <- fetchResult{
+					ep: ep, epNo: epNo, scenarioID: scenarioID,
+					jpScenario: jpScenario, cnScenario: cnScenario, err: err,
+				}
+			}
+		}()
+	}
+	go func() {
+		for _, ep := range jpEpisodes {
+			jobs <- ep
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
 
-	for _, ep := range jpEpisodes {
-		epNo := getInt(ep, "episodeNo")
-		scenarioID := getString(ep, "scenarioId")
-		if scenarioID == "" {
-			continue
-		}
-		scenarioPath := fmt.Sprintf("event_story/%s/scenario/%s", asset, scenarioID)
-		jpScenario, err := t.fetchJPScenarioJSON(scenarioPath)
-		if err != nil {
+	for fetched := range results {
+		if fetched.err != nil {
 			errs++
 			continue
 		}
-		cnScenario, err := t.fetchJSONURL(fmt.Sprintf("%s/%s.json", cnAssetsURL, scenarioPath))
-		if err != nil {
-			errs++
-			continue
-		}
+		ep, epNo, scenarioID := fetched.ep, fetched.epNo, fetched.scenarioID
+		jpScenario, cnScenario := fetched.jpScenario, fetched.cnScenario
 
 		jpTalk := toMapSlice(asMap(jpScenario)["TalkData"])
 		cnTalk := toMapSlice(asMap(cnScenario)["TalkData"])
@@ -253,17 +296,52 @@ func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]
 	jpEpisodes := toMapSlice(jpStory["eventStoryEpisodes"])
 	episodes := map[string]builtEpisode{}
 	errs := 0
-
-	for _, ep := range jpEpisodes {
-		epNo := getInt(ep, "episodeNo")
-		scenarioID := getString(ep, "scenarioId")
-		if scenarioID == "" {
-			continue
+	type fetchResult struct {
+		ep         map[string]any
+		epNo       int
+		scenarioID string
+		jpScenario any
+		err        error
+	}
+	jobs := make(chan map[string]any)
+	results := make(chan fetchResult, len(jpEpisodes))
+	workers := t.fetchConcurrency()
+	if workers > len(jpEpisodes) {
+		workers = len(jpEpisodes)
+	}
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ep := range jobs {
+				epNo := getInt(ep, "episodeNo")
+				scenarioID := getString(ep, "scenarioId")
+				if scenarioID == "" {
+					continue
+				}
+				scenarioPath := fmt.Sprintf("event_story/%s/scenario/%s", asset, scenarioID)
+				jpScenario, err := t.fetchJPScenarioJSON(scenarioPath)
+				results <- fetchResult{
+					ep: ep, epNo: epNo, scenarioID: scenarioID,
+					jpScenario: jpScenario, err: err,
+				}
+			}
+		}()
+	}
+	go func() {
+		for _, ep := range jpEpisodes {
+			jobs <- ep
 		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	for fetched := range results {
+		ep, epNo, scenarioID := fetched.ep, fetched.epNo, fetched.scenarioID
 		title := strings.TrimSpace(getString(ep, "title"))
-		scenarioPath := fmt.Sprintf("event_story/%s/scenario/%s", asset, scenarioID)
-		jpScenario, err := t.fetchJPScenarioJSON(scenarioPath)
-		if err != nil {
+		if fetched.err != nil {
 			errs++
 			if title != "" {
 				episodes[strconv.Itoa(epNo)] = builtEpisode{
@@ -273,6 +351,7 @@ func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]
 			}
 			continue
 		}
+		jpScenario := fetched.jpScenario
 		jpTalk := toMapSlice(asMap(jpScenario)["TalkData"])
 		talkData := map[string]string{}
 		speakerNames := map[string]string{}
@@ -312,8 +391,9 @@ func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]
 
 // fillEventStoriesJPPending writes JP-pending stories for new events and runs
 // auto LLM translation on them.
-func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, startEventID int, states map[int]store.EventSyncState) (int, error) {
+func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, startEventID int, states map[int]store.EventSyncState, progressCurrent, progressTotal int) (int, int, error) {
 	processed := 0
+	fetchFailures := 0
 	for _, jpStory := range jpStories {
 		eventID := getInt(jpStory, "eventId")
 		if eventID < startEventID {
@@ -322,13 +402,16 @@ func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, start
 		if _, exists := states[eventID]; exists {
 			continue
 		}
-		episodes, _ := t.buildJPPendingEpisodes(jpStory)
+		t.setNote(fmt.Sprintf("cn-sync JP-pending event story %d", eventID))
+		t.emit("sync.progress", fmt.Sprintf("正在拉取 JP 剧情 Event #%d", eventID), progressCurrent, progressTotal)
+		episodes, errs := t.buildJPPendingEpisodes(jpStory)
+		fetchFailures += errs
 		if len(episodes) == 0 {
 			continue
 		}
 		meta := model.EventStoryMeta{Source: "jp_pending", Version: "1.0", LastUpdated: time.Now().Unix()}
 		if err := t.eventStore.ImportOrdered(eventID, meta, toOrderedEpisodes(episodes, "unknown")); err != nil {
-			return processed, err
+			return processed, fetchFailures, err
 		}
 		states[eventID] = store.EventSyncState{EventID: eventID, Source: "jp_pending"}
 		// Auto-translate the freshly written JP-pending story.
@@ -336,5 +419,5 @@ func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, start
 			processed++
 		}
 	}
-	return processed, nil
+	return processed, fetchFailures, nil
 }

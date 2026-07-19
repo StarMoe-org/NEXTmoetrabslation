@@ -54,7 +54,7 @@ v2/
 
 ## 更新检测
 
-默认轮询 `https://metadata.pjsk.moe/jp/versions/current_version.json` 的 `dataVersion`（不走 GitHub raw / REST API）。变化时触发 CN 同步；同步 masterdata 默认使用 `https://metadata.pjsk.moe/{jp|cn}/master/`。也可通过 `UPSTREAM_VERSION_URL` / `upstream.version_url` 指向自己的 CDN 或 `https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json`；watcher 会按 `Retry-After` 或本地退避自动冷却 429。可选维护本地 git 镜像（`UPSTREAM_USE_GIT=true`）。
+默认轮询 `https://metadata.pjsk.moe/jp/versions/current_version.json` 的 `dataVersion`，失败时自动切换到 jsDelivr 版本文件。JP/CN masterdata 和 JP/CN 剧情资源均支持主源、备用源与 `{repo}` / `{branch}` 模板；默认 JP 剧情源为 `assets.unipjsk.com`（已移除持续返回 HTTP 525 的 snowyassets 默认链路）。同步会有限并发拉取分类及剧情资源，默认并发数为 4，可通过 `UPSTREAM_FETCH_CONCURRENCY` / `upstream.fetch_concurrency` 调整。watcher 会记录实际使用源、上次成功时间和连续失败次数，并按 `Retry-After` 或本地退避冷却 429。完整配置见 `.env.example`，可选维护本地 git 镜像（`UPSTREAM_USE_GIT=true`）。
 
 ## 备份 / 恢复
 

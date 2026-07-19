@@ -1,10 +1,32 @@
 package translator
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"moesekai/server/internal/config"
+	"moesekai/server/internal/db"
 )
+
+func openTranslatorConfig(t *testing.T) *config.Config {
+	t.Helper()
+	database, err := db.Open(t.TempDir() + "/translator.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	cfg, err := config.New(database, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
 
 func TestBuildAndParseXMLRoundTrip(t *testing.T) {
 	texts := []string{"こんにちは", "A & B", "<tag>", "三", ""}
@@ -76,5 +98,117 @@ func TestNormalizeStorySource(t *testing.T) {
 		if got := normalizeStorySource(in); got != want {
 			t.Errorf("normalizeStorySource(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestFetchJPScenarioUsesHealthyFallbackImmediately(t *testing.T) {
+	var primaryCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.WriteHeader(525)
+	}))
+	defer primary.Close()
+
+	var fallbackCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"TalkData":[{"Body":"hello"}]}`)
+	}))
+	defer fallback.Close()
+
+	cfg := openTranslatorConfig(t)
+	cfg.Set(config.KeyUpstreamJPAssetsURL, primary.URL)
+	cfg.Set(config.KeyUpstreamJPAssetsFallbackURL, fallback.URL)
+	tr := New(nil, nil, cfg)
+
+	result, err := tr.fetchJPScenarioJSON("event_story/test/scenario/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scenarioHasTalkData(result) {
+		t.Fatalf("fallback result missing TalkData: %#v", result)
+	}
+	if primaryCalls.Load() != 1 || fallbackCalls.Load() != 1 {
+		t.Fatalf("dead primary was retried before fallback: primary=%d fallback=%d", primaryCalls.Load(), fallbackCalls.Load())
+	}
+}
+
+func TestDefaultJPAssetSourceIsHealthyMirror(t *testing.T) {
+	tr := &Translator{}
+	bases := tr.jpAssetBases()
+	if len(bases) == 0 || bases[0] != "https://assets.unipjsk.com/ondemand" {
+		t.Fatalf("unexpected default JP asset sources: %v", bases)
+	}
+}
+
+func TestMasterdataFallsBackToSecondarySource(t *testing.T) {
+	var primaryCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer primary.Close()
+
+	var fallbackCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":1}]`)
+	}))
+	defer fallback.Close()
+
+	cfg := openTranslatorConfig(t)
+	cfg.Set(config.KeyUpstreamJPMasterdataURL, primary.URL)
+	cfg.Set(config.KeyUpstreamJPMasterdataFallbackURL, fallback.URL)
+	tr := New(nil, nil, cfg)
+
+	items, err := tr.fetchMasterdata("events.json", "jp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || primaryCalls.Load() != 1 || fallbackCalls.Load() != 1 {
+		t.Fatalf("unexpected fallback result: items=%v primary=%d fallback=%d", items, primaryCalls.Load(), fallbackCalls.Load())
+	}
+}
+
+func TestBuildJPPendingEpisodesFetchesConcurrently(t *testing.T) {
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			seen := maxActive.Load()
+			if current <= seen || maxActive.CompareAndSwap(seen, current) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"TalkData":[{"Body":"line","WindowDisplayName":"name"}]}`)
+	}))
+	defer server.Close()
+
+	cfg := openTranslatorConfig(t)
+	cfg.Set(config.KeyUpstreamJPAssetsURL, server.URL)
+	cfg.Set(config.KeyUpstreamFetchConcurrency, "4")
+	tr := New(nil, nil, cfg)
+	story := map[string]any{
+		"assetbundleName": "asset",
+		"eventStoryEpisodes": []any{
+			map[string]any{"episodeNo": float64(1), "scenarioId": "one", "title": "1"},
+			map[string]any{"episodeNo": float64(2), "scenarioId": "two", "title": "2"},
+			map[string]any{"episodeNo": float64(3), "scenarioId": "three", "title": "3"},
+			map[string]any{"episodeNo": float64(4), "scenarioId": "four", "title": "4"},
+		},
+	}
+
+	episodes, errs := tr.buildJPPendingEpisodes(story)
+	if errs != 0 || len(episodes) != 4 {
+		t.Fatalf("unexpected build result: episodes=%d errors=%d", len(episodes), errs)
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("scenario requests were not concurrent; max=%d", maxActive.Load())
 	}
 }

@@ -244,11 +244,11 @@ func (t *Translator) extractMysekai() (map[string]store.CNApplyField, error) {
 func (t *Translator) extractCostumes() (map[string]store.CNApplyField, error) {
 	out := newExtractResult("name", "colorName", "designer")
 	tm := newTraceMap("name", "colorName", "designer")
-	jpRaw, err := t.fetchJSONURL(jpMasterdataURL + "/snowy_costumes.json")
+	jpRaw, err := t.fetchMasterdataDocument("snowy_costumes.json", "jp")
 	if err != nil {
 		return nil, err
 	}
-	cnRaw, err := t.fetchJSONURL(cnMasterdataURL + "/snowy_costumes.json")
+	cnRaw, err := t.fetchMasterdataDocument("snowy_costumes.json", "cn")
 	if err != nil {
 		return nil, err
 	}

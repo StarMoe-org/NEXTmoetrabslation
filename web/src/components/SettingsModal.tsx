@@ -16,6 +16,7 @@ type ShowFn = (msg: string, type?: "ok" | "err") => void;
 
 export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { show } = useToast();
+  const [upstreamRefreshKey, setUpstreamRefreshKey] = useState(0);
 
   return (
     <Modal open={open} onClose={onClose} title="用户设置">
@@ -24,8 +25,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <AppearanceCard />
         <ShortcutCard />
         <BadgeFilterCard show={show} />
-        <DataManagementCard show={show} />
-        <UpstreamStatusCard show={show} />
+        <DataManagementCard show={show} onSyncFinished={() => setUpstreamRefreshKey((v) => v + 1)} />
+        <UpstreamStatusCard show={show} refreshKey={upstreamRefreshKey} />
       </div>
     </Modal>
   );
@@ -193,7 +194,7 @@ function BadgeFilterCard({ show }: { show: ShowFn }) {
 
 // ---- Data management (CN sync + manual backup) ----
 
-function DataManagementCard({ show }: { show: ShowFn }) {
+function DataManagementCard({ show, onSyncFinished }: { show: ShowFn; onSyncFinished: () => void }) {
   const [busy, setBusy] = useState(false);
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,12 +213,17 @@ function DataManagementCard({ show }: { show: ShowFn }) {
     if (busy) return;
     setBusy(true);
     try {
-      await runCNSync();
-      show("数据更新完成", "ok");
+      const result = await runCNSync();
+      if (result.skipped?.length) {
+        show(`数据更新完成，但跳过: ${result.skipped.join(", ")}`, "err");
+      } else {
+        show("数据更新完成", "ok");
+      }
     } catch (e) {
       show(e instanceof Error ? e.message : "更新失败", "err");
     } finally {
       setBusy(false);
+      onSyncFinished();
     }
   };
 
@@ -268,7 +274,7 @@ function DataManagementCard({ show }: { show: ShowFn }) {
 
 // ---- Upstream status (read-only) ----
 
-function UpstreamStatusCard({ show }: { show: ShowFn }) {
+function UpstreamStatusCard({ show, refreshKey }: { show: ShowFn; refreshKey: number }) {
   const [status, setStatus] = useState<UpstreamStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const reload = useCallback(() => {
@@ -278,7 +284,7 @@ function UpstreamStatusCard({ show }: { show: ShowFn }) {
       .catch((e) => show(e instanceof Error ? e.message : "获取失败", "err"))
       .finally(() => setLoading(false));
   }, [show]);
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => { reload(); }, [reload, refreshKey]);
 
   return (
     <div className="card">
@@ -291,11 +297,14 @@ function UpstreamStatusCard({ show }: { show: ShowFn }) {
             <tr><th>启用</th><td>{status.enabled ? "是" : "否"}</td></tr>
             <tr><th>仓库</th><td>{status.repo ? `${status.repo}@${status.branch}` : "—"}</td></tr>
             <tr><th>检测源</th><td>{status.versionURL || "—"}</td></tr>
+            {status.lastSource && <tr><th>实际使用源</th><td>{status.lastSource}</td></tr>}
             <tr><th>当前 dataVersion</th><td>{status.lastDataVersion || "—"}</td></tr>
             <tr><th>上次检查</th><td>{status.lastCheck || "—"}</td></tr>
+            <tr><th>上次成功</th><td>{status.lastSuccess || "—"}</td></tr>
             <tr><th>上次同步</th><td>{status.lastSync || "—"}</td></tr>
+            {!!status.consecutiveFailures && <tr><th>连续失败</th><td>{status.consecutiveFailures}</td></tr>}
             {status.rateLimitedUntil && <tr><th>限流冷却</th><td>{status.rateLimitedUntil}</td></tr>}
-            {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}</td></tr>}
+            {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}{status.lastErrorAt ? ` (${status.lastErrorAt})` : ""}</td></tr>}
           </tbody>
         </table>
       ) : (

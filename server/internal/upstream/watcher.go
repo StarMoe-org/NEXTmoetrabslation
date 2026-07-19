@@ -9,8 +9,10 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,13 +23,16 @@ import (
 	"time"
 
 	"moesekai/server/internal/config"
+	"moesekai/server/internal/httpx"
 )
 
 const (
-	defaultPollInterval      = time.Hour
-	defaultRateLimitCooldown = time.Hour
-	maxRetryAfterCooldown    = 24 * time.Hour
-	maxFallbackCooldown      = 6 * time.Hour
+	defaultPollInterval       = time.Hour
+	defaultRateLimitCooldown  = time.Hour
+	maxRetryAfterCooldown     = 24 * time.Hour
+	maxFallbackCooldown       = 6 * time.Hour
+	defaultVersionURL         = "https://metadata.pjsk.moe/jp/versions/current_version.json"
+	defaultVersionFallbackURL = "https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json"
 )
 
 // VersionInfo is the subset of current_version.json we care about.
@@ -42,17 +47,22 @@ type SyncFn func() error
 
 // Status reports the watcher's state for the admin UI.
 type Status struct {
-	Enabled          bool   `json:"enabled"`
-	Repo             string `json:"repo"`
-	Branch           string `json:"branch"`
-	VersionURL       string `json:"versionURL,omitempty"`
-	LastCheck        string `json:"lastCheck,omitempty"`
-	LastDataVersion  string `json:"lastDataVersion,omitempty"`
-	ChangeDetectedAt string `json:"changeDetectedAt,omitempty"`
-	LastSync         string `json:"lastSync,omitempty"`
-	LastError        string `json:"lastError,omitempty"`
-	RateLimitedUntil string `json:"rateLimitedUntil,omitempty"`
-	GitMirrorReady   bool   `json:"gitMirrorReady"`
+	Enabled             bool   `json:"enabled"`
+	Repo                string `json:"repo"`
+	Branch              string `json:"branch"`
+	VersionURL          string `json:"versionURL,omitempty"`
+	VersionFallbackURL  string `json:"versionFallbackURL,omitempty"`
+	LastSource          string `json:"lastSource,omitempty"`
+	LastCheck           string `json:"lastCheck,omitempty"`
+	LastSuccess         string `json:"lastSuccess,omitempty"`
+	LastDataVersion     string `json:"lastDataVersion,omitempty"`
+	ChangeDetectedAt    string `json:"changeDetectedAt,omitempty"`
+	LastSync            string `json:"lastSync,omitempty"`
+	LastError           string `json:"lastError,omitempty"`
+	LastErrorAt         string `json:"lastErrorAt,omitempty"`
+	ConsecutiveFailures int    `json:"consecutiveFailures,omitempty"`
+	RateLimitedUntil    string `json:"rateLimitedUntil,omitempty"`
+	GitMirrorReady      bool   `json:"gitMirrorReady"`
 }
 
 // Watcher polls current_version.json and triggers sync on dataVersion change.
@@ -69,6 +79,7 @@ type Watcher struct {
 	status           Status
 	etag             string
 	lastModified     string
+	validatorURL     string
 	cachedVersion    VersionInfo
 	rateLimitedUntil time.Time
 
@@ -90,7 +101,7 @@ func New(cfg *config.Config, syncFn SyncFn, opts Options) *Watcher {
 	return &Watcher{
 		cfg:      cfg,
 		syncFn:   syncFn,
-		client:   &http.Client{Timeout: 20 * time.Second},
+		client:   httpx.NewClient(30 * time.Second),
 		interval: interval,
 		gitDir:   opts.GitDir,
 		useGit:   opts.UseGit && opts.GitDir != "",
@@ -105,11 +116,31 @@ func (w *Watcher) versionURL() string {
 	return expandVersionURL(w.cfg.Get(config.KeyUpstreamVersionURL), repo, branch)
 }
 
+func (w *Watcher) versionURLs() []string {
+	repo := w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
+	branch := w.cfg.GetOr(config.KeyUpstreamBranch, "main")
+	primary := expandVersionURL(w.cfg.Get(config.KeyUpstreamVersionURL), repo, branch)
+	fallback := expandVersionTemplate(
+		w.cfg.GetOr(config.KeyUpstreamVersionFallbackURL, defaultVersionFallbackURL),
+		repo, branch,
+	)
+	urls := []string{primary}
+	if fallback != "" && fallback != primary {
+		urls = append(urls, fallback)
+	}
+	return urls
+}
+
 func expandVersionURL(tmpl, repo, branch string) string {
 	tmpl = strings.TrimSpace(tmpl)
 	if tmpl == "" {
-		return "https://metadata.pjsk.moe/jp/versions/current_version.json"
+		tmpl = defaultVersionURL
 	}
+	return expandVersionTemplate(tmpl, repo, branch)
+}
+
+func expandVersionTemplate(tmpl, repo, branch string) string {
+	tmpl = strings.TrimSpace(tmpl)
 	tmpl = strings.ReplaceAll(tmpl, "{repo}", repo)
 	tmpl = strings.ReplaceAll(tmpl, "{branch}", branch)
 	return tmpl
@@ -127,6 +158,10 @@ func (w *Watcher) Start() {
 		s.Repo = w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
 		s.Branch = w.cfg.GetOr(config.KeyUpstreamBranch, "main")
 		s.VersionURL = w.versionURL()
+		urls := w.versionURLs()
+		if len(urls) > 1 {
+			s.VersionFallbackURL = urls[1]
+		}
 	})
 	if w.useGit {
 		go w.ensureGitMirror()
@@ -172,7 +207,9 @@ func (w *Watcher) CheckNow(force bool) (Status, error) {
 		return w.Status(), err
 	}
 	if changed || force {
-		w.runSync()
+		if err := w.runSync(); err != nil {
+			return w.Status(), err
+		}
 	}
 	return w.Status(), nil
 }
@@ -188,7 +225,9 @@ func (w *Watcher) check(baseline bool) {
 		return
 	}
 	if changed {
-		w.runSync()
+		if err := w.runSync(); err != nil {
+			fmt.Printf("[upstream] sync failed: %v\n", err)
+		}
 	}
 }
 
@@ -198,23 +237,42 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 	w.checkMu.Lock()
 	defer w.checkMu.Unlock()
 
-	info, err := w.fetchVersion()
+	info, sourceURL, err := w.fetchVersion()
+	checkedAt := nowRFC3339()
 	if err != nil {
 		w.setStatus(func(s *Status) {
-			s.LastCheck = nowRFC3339()
+			s.LastCheck = checkedAt
 			s.LastError = err.Error()
+			s.LastErrorAt = checkedAt
+			s.ConsecutiveFailures++
 			s.VersionURL = w.versionURL()
+			urls := w.versionURLs()
+			if len(urls) > 1 {
+				s.VersionFallbackURL = urls[1]
+			} else {
+				s.VersionFallbackURL = ""
+			}
 		})
 		return false, err
 	}
 	changed := false
 	w.setStatus(func(s *Status) {
-		s.LastCheck = nowRFC3339()
+		s.LastCheck = checkedAt
+		s.LastSuccess = checkedAt
 		s.LastError = ""
+		s.LastErrorAt = ""
+		s.ConsecutiveFailures = 0
 		s.VersionURL = w.versionURL()
+		s.LastSource = sourceURL
+		urls := w.versionURLs()
+		if len(urls) > 1 {
+			s.VersionFallbackURL = urls[1]
+		} else {
+			s.VersionFallbackURL = ""
+		}
 		if s.LastDataVersion != "" && s.LastDataVersion != info.DataVersion {
 			changed = true
-			s.ChangeDetectedAt = nowRFC3339()
+			s.ChangeDetectedAt = checkedAt
 		}
 		s.LastDataVersion = info.DataVersion
 	})
@@ -224,20 +282,66 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 	return changed, nil
 }
 
-func (w *Watcher) fetchVersion() (VersionInfo, error) {
+func (w *Watcher) fetchVersion() (VersionInfo, string, error) {
 	var info VersionInfo
 	now := time.Now()
-	etag, lastModified, cached, rateLimitedUntil := w.fetchState()
+	_, _, _, rateLimitedUntil := w.fetchState("")
 	if !rateLimitedUntil.IsZero() {
 		if now.Before(rateLimitedUntil) {
-			return info, fmt.Errorf("version fetch paused after GitHub HTTP 429; retry after %s", rateLimitedUntil.UTC().Format(time.RFC3339))
+			return info, "", fmt.Errorf("version fetch paused after HTTP 429; retry after %s", rateLimitedUntil.UTC().Format(time.RFC3339))
 		}
 		w.clearRateLimit()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, w.versionURL(), nil)
+	type failedSource struct {
+		err        error
+		retryAfter string
+	}
+	var failures []failedSource
+	var retryable []string
+	for _, sourceURL := range w.versionURLs() {
+		fetched, retryAfter, err := w.fetchVersionURL(sourceURL)
+		if err == nil {
+			return fetched, sourceURL, nil
+		}
+		failures = append(failures, failedSource{err: err, retryAfter: retryAfter})
+		if isRetryableVersionError(err) {
+			retryable = append(retryable, sourceURL)
+		}
+	}
+
+	if len(retryable) > 0 {
+		time.Sleep(500 * time.Millisecond)
+		for _, sourceURL := range retryable {
+			fetched, retryAfter, err := w.fetchVersionURL(sourceURL)
+			if err == nil {
+				return fetched, sourceURL, nil
+			}
+			failures = append(failures, failedSource{err: fmt.Errorf("retry: %w", err), retryAfter: retryAfter})
+		}
+	}
+
+	for _, failure := range failures {
+		if failure.retryAfter == "" && !strings.Contains(failure.err.Error(), "http 429") {
+			continue
+		}
+		until := now.Add(rateLimitCooldown(failure.retryAfter, now, w.interval))
+		w.setRateLimit(until)
+		break
+	}
+	parts := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		parts = append(parts, failure.err.Error())
+	}
+	return info, "", fmt.Errorf("all version sources failed: %s", strings.Join(parts, "; "))
+}
+
+func (w *Watcher) fetchVersionURL(sourceURL string) (VersionInfo, string, error) {
+	var info VersionInfo
+	etag, lastModified, cached, _ := w.fetchState(sourceURL)
+	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
 	if err != nil {
-		return info, err
+		return info, "", err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "moesekai-upstream-watcher")
@@ -249,45 +353,47 @@ func (w *Watcher) fetchVersion() (VersionInfo, error) {
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return info, err
+		return info, "", fmt.Errorf("GET %s: %w", sourceURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
 		if cached.DataVersion == "" {
-			return info, fmt.Errorf("version fetch http 304 but no cached dataVersion")
+			return info, "", fmt.Errorf("GET %s: http 304 but no cached dataVersion", sourceURL)
 		}
-		w.updateValidators(resp, cached)
-		return cached, nil
+		w.updateValidators(resp, cached, sourceURL)
+		return cached, "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusTooManyRequests {
-			until := now.Add(rateLimitCooldown(resp.Header.Get("Retry-After"), now, w.interval))
-			w.setRateLimit(until)
-			return info, fmt.Errorf("version fetch http 429: version source rate limited; retry after %s", until.UTC().Format(time.RFC3339))
+			return info, resp.Header.Get("Retry-After"), fmt.Errorf("GET %s: http 429: version source rate limited", sourceURL)
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return info, fmt.Errorf("version fetch http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return info, "", fmt.Errorf("GET %s: http %d: %s", sourceURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return info, err
+		return info, "", fmt.Errorf("GET %s: decode: %w", sourceURL, err)
 	}
 	if info.DataVersion == "" {
-		return info, fmt.Errorf("current_version.json missing dataVersion")
+		return info, "", fmt.Errorf("GET %s: current_version.json missing dataVersion", sourceURL)
 	}
-	w.updateValidators(resp, info)
-	return info, nil
+	w.updateValidators(resp, info, sourceURL)
+	return info, "", nil
 }
 
-func (w *Watcher) fetchState() (etag, lastModified string, cached VersionInfo, rateLimitedUntil time.Time) {
+func (w *Watcher) fetchState(sourceURL string) (etag, lastModified string, cached VersionInfo, rateLimitedUntil time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.etag, w.lastModified, w.cachedVersion, w.rateLimitedUntil
+	if sourceURL == "" || sourceURL == w.validatorURL {
+		etag, lastModified = w.etag, w.lastModified
+	}
+	return etag, lastModified, w.cachedVersion, w.rateLimitedUntil
 }
 
-func (w *Watcher) updateValidators(resp *http.Response, info VersionInfo) {
+func (w *Watcher) updateValidators(resp *http.Response, info VersionInfo, sourceURL string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.cachedVersion = info
+	w.validatorURL = sourceURL
 	if etag := resp.Header.Get("ETag"); etag != "" || resp.StatusCode == http.StatusOK {
 		w.etag = etag
 	}
@@ -296,6 +402,23 @@ func (w *Watcher) updateValidators(resp *http.Response, info VersionInfo) {
 	}
 	w.rateLimitedUntil = time.Time{}
 	w.status.RateLimitedUntil = ""
+}
+
+func isRetryableVersionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "http 500") ||
+		strings.Contains(s, "http 502") ||
+		strings.Contains(s, "http 503") ||
+		strings.Contains(s, "http 504") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "EOF")
 }
 
 func (w *Watcher) setRateLimit(until time.Time) {
@@ -350,26 +473,42 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	return 0
 }
 
+// RecordSyncResult updates the shared upstream status after a scheduled or
+// manual data sync. A complete manual sync clears a stale watcher error because
+// it has just verified the configured upstream data path end to end.
+func (w *Watcher) RecordSyncResult(err error) {
+	stamp := nowRFC3339()
+	w.setStatus(func(s *Status) {
+		if err != nil {
+			s.LastError = err.Error()
+			s.LastErrorAt = stamp
+			return
+		}
+		s.LastSync = stamp
+		s.LastSuccess = stamp
+		s.LastError = ""
+		s.LastErrorAt = ""
+		s.ConsecutiveFailures = 0
+	})
+}
+
 // runSync refreshes the git mirror (if enabled) then runs the CN sync.
-func (w *Watcher) runSync() {
+func (w *Watcher) runSync() error {
 	if w.useGit {
 		if err := w.pullGitMirror(); err != nil {
 			fmt.Printf("[upstream] git mirror pull failed (continuing with HTTP sync): %v\n", err)
 		}
 	}
 	if w.syncFn == nil {
-		return
+		return nil
 	}
 	if err := w.syncFn(); err != nil {
-		fmt.Printf("[upstream] sync failed: %v\n", err)
-		w.setStatus(func(s *Status) { s.LastError = err.Error() })
-		return
+		w.RecordSyncResult(err)
+		return err
 	}
-	w.setStatus(func(s *Status) {
-		s.LastSync = nowRFC3339()
-		s.LastError = ""
-	})
+	w.RecordSyncResult(nil)
 	fmt.Println("[upstream] sync completed after upstream change")
+	return nil
 }
 
 // ---- git mirror (optional) ----

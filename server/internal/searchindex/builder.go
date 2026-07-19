@@ -14,14 +14,16 @@ import (
 	"sync"
 	"time"
 
+	"moesekai/server/internal/config"
 	"moesekai/server/internal/filesvc"
+	"moesekai/server/internal/httpx"
 	"moesekai/server/internal/model"
 	"moesekai/server/internal/store"
 )
 
-// Masterdata mirror base URLs.
 const (
-	jpMasterdataURL = "https://metadata.pjsk.moe/jp/master"
+	defaultJPMasterdataURL         = "https://metadata.pjsk.moe/jp/master"
+	defaultJPMasterdataFallbackURL = "https://raw.githubusercontent.com/{repo}/{branch}/master"
 )
 
 type Entry struct {
@@ -36,6 +38,7 @@ type Entry struct {
 type Builder struct {
 	store    *store.Store
 	files    *filesvc.Service
+	cfg      *config.Config
 	client   *http.Client
 	debounce time.Duration
 	refresh  time.Duration
@@ -47,7 +50,7 @@ type Builder struct {
 	lastResult string
 }
 
-func New(s *store.Store, fsvc *filesvc.Service, debounce, refresh time.Duration) *Builder {
+func New(s *store.Store, fsvc *filesvc.Service, cfg *config.Config, debounce, refresh time.Duration) *Builder {
 	if debounce <= 0 {
 		debounce = time.Hour
 	}
@@ -57,7 +60,8 @@ func New(s *store.Store, fsvc *filesvc.Service, debounce, refresh time.Duration)
 	return &Builder{
 		store:     s,
 		files:     fsvc,
-		client:    &http.Client{Timeout: 40 * time.Second},
+		cfg:       cfg,
+		client:    httpx.NewClient(60 * time.Second),
 		debounce:  debounce,
 		refresh:   refresh,
 		triggerCh: make(chan struct{}, 1),
@@ -212,7 +216,7 @@ func (b *Builder) build(reason string) {
 }
 
 func (b *Builder) fetchArray(filename string) ([]map[string]any, error) {
-	data, err := b.fetchJSON(jpMasterdataURL + "/" + filename)
+	data, err := b.fetchMasterdata(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +234,7 @@ func (b *Builder) fetchArray(filename string) ([]map[string]any, error) {
 }
 
 func (b *Builder) fetchCostumes() ([]map[string]any, error) {
-	data, err := b.fetchJSON(jpMasterdataURL + "/snowy_costumes.json")
+	data, err := b.fetchMasterdata("snowy_costumes.json")
 	if err != nil {
 		return nil, err
 	}
@@ -251,20 +255,53 @@ func (b *Builder) fetchCostumes() ([]map[string]any, error) {
 	return out, nil
 }
 
+func (b *Builder) fetchMasterdata(filename string) (any, error) {
+	bases := []string{defaultJPMasterdataURL, defaultJPMasterdataFallbackURL}
+	repo, branch := "Team-Haruki/haruki-sekai-master", "main"
+	if b.cfg != nil {
+		bases[0] = b.cfg.GetOr(config.KeyUpstreamJPMasterdataURL, bases[0])
+		bases[1] = b.cfg.GetOr(config.KeyUpstreamJPMasterdataFallbackURL, bases[1])
+		repo = b.cfg.GetOr(config.KeyUpstreamRepo, repo)
+		branch = b.cfg.GetOr(config.KeyUpstreamBranch, branch)
+	}
+	seen := map[string]bool{}
+	var failures []string
+	for _, base := range bases {
+		base = strings.TrimRight(strings.TrimSpace(base), "/")
+		base = strings.ReplaceAll(base, "{repo}", repo)
+		base = strings.ReplaceAll(base, "{branch}", branch)
+		if base == "" || seen[base] {
+			continue
+		}
+		seen[base] = true
+		url := base + "/" + strings.TrimLeft(filename, "/")
+		data, err := b.fetchJSON(url)
+		if err == nil {
+			return data, nil
+		}
+		failures = append(failures, err.Error())
+	}
+	if len(failures) == 0 {
+		return nil, fmt.Errorf("no JP masterdata source configured")
+	}
+	return nil, fmt.Errorf("all JP masterdata sources failed: %s", strings.Join(failures, "; "))
+}
+
 func (b *Builder) fetchJSON(url string) (any, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("User-Agent", "moesekai-search-index")
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("GET %s: http %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var reader io.Reader = resp.Body
 	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {

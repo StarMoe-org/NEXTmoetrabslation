@@ -32,10 +32,20 @@ const (
 	KeyBatchSize     = "translate.batch_size"
 	KeyRateDelayMS   = "translate.rate_delay_ms"
 
-	KeyUpstreamRepo       = "upstream.repo"   // e.g. Team-Haruki/haruki-sekai-master
-	KeyUpstreamBranch     = "upstream.branch" // e.g. main
-	KeyUpstreamVersionURL = "upstream.version_url"
-	KeySchedulerOn        = "scheduler.enabled"
+	KeyUpstreamRepo                    = "upstream.repo"   // e.g. Team-Haruki/haruki-sekai-master
+	KeyUpstreamBranch                  = "upstream.branch" // e.g. main
+	KeyUpstreamVersionURL              = "upstream.version_url"
+	KeyUpstreamVersionFallbackURL      = "upstream.version_fallback_url"
+	KeyUpstreamJPMasterdataURL         = "upstream.jp_masterdata_url"
+	KeyUpstreamJPMasterdataFallbackURL = "upstream.jp_masterdata_fallback_url"
+	KeyUpstreamCNMasterdataURL         = "upstream.cn_masterdata_url"
+	KeyUpstreamCNMasterdataFallbackURL = "upstream.cn_masterdata_fallback_url"
+	KeyUpstreamJPAssetsURL             = "upstream.jp_assets_url"
+	KeyUpstreamJPAssetsFallbackURL     = "upstream.jp_assets_fallback_url"
+	KeyUpstreamCNAssetsURL             = "upstream.cn_assets_url"
+	KeyUpstreamCNAssetsFallbackURL     = "upstream.cn_assets_fallback_url"
+	KeyUpstreamFetchConcurrency        = "upstream.fetch_concurrency"
+	KeySchedulerOn                     = "scheduler.enabled"
 
 	KeyBackupS3Enabled   = "backup.s3.enabled"
 	KeyBackupS3Endpoint  = "backup.s3.endpoint"

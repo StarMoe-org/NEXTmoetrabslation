@@ -75,13 +75,26 @@ export interface UpstreamStatus {
   repo?: string;
   branch?: string;
   versionURL?: string;
+  versionFallbackURL?: string;
+  lastSource?: string;
   lastCheck?: string;
+  lastSuccess?: string;
   lastDataVersion?: string;
   changeDetectedAt?: string;
   lastSync?: string;
   lastError?: string;
+  lastErrorAt?: string;
+  consecutiveFailures?: number;
   rateLimitedUntil?: string;
   gitMirrorReady?: boolean;
+}
+
+export interface CNSyncResult {
+  mode: string;
+  categories: number;
+  updatedEntries: number;
+  eventStoryFiles: number;
+  skipped?: string[];
 }
 
 export interface BackupStatus {
@@ -199,7 +212,7 @@ export const reorderEventStory = (eventId: number) =>
 // ---- Translation engine ----
 
 export const getTranslateStatus = () => apiFetch<TranslateStatus>("/translate/status");
-export const runCNSync = () => apiFetch<Record<string, unknown>>("/translate/cn-sync", { method: "POST" });
+export const runCNSync = () => apiFetch<CNSyncResult>("/translate/cn-sync", { method: "POST" });
 export const triggerAITranslate = (category: string, field: string, provider: "gemini" | "openai") =>
   apiFetch<Record<string, unknown>>("/translate/ai", { method: "POST", body: JSON.stringify({ category, field, provider }) });
 export const triggerAITranslateAll = (provider: "gemini" | "openai") =>

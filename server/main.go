@@ -66,7 +66,7 @@ func main() {
 	// Regenerate public files whenever the DB changes (debounced inside).
 	st.OnChange(fileService.Trigger)
 
-	idx := searchindex.New(st, fileService,
+	idx := searchindex.New(st, fileService, cfg,
 		parseDurMs(envOr("SEARCH_INDEX_DEBOUNCE_MS", "3600000")),
 		parseDurMs(envOr("SEARCH_INDEX_REFRESH_MS", "3600000")))
 	idx.Start()
@@ -83,8 +83,14 @@ func main() {
 	// backs off on raw-content 429s, and triggers CN sync on change.
 	useGit := envOr("UPSTREAM_USE_GIT", "false") == "true"
 	watcher := upstream.New(cfg, func() error {
-		_, err := tr.SyncCNOnly()
-		return err
+		result, err := tr.SyncCNOnly()
+		if err != nil {
+			return err
+		}
+		if len(result.Skipped) > 0 {
+			return fmt.Errorf("data sync skipped: %s", strings.Join(result.Skipped, ", "))
+		}
+		return nil
 	}, upstream.Options{
 		Interval: parseDurMs(envOr("UPSTREAM_POLL_MS", "3600000")),
 		GitDir:   filepath.Join(dataDir, "masterdata-mirror"),
@@ -150,23 +156,33 @@ func main() {
 // admin UI authoritative thereafter.
 func seedConfigFromEnv(cfg *config.Config) {
 	seed := map[string]string{
-		config.KeyLLMType:            os.Getenv("LLM_TYPE"),
-		config.KeyGeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
-		config.KeyGeminiModel:        os.Getenv("GEMINI_MODEL"),
-		config.KeyOpenAIAPIKey:       os.Getenv("OPENAI_API_KEY"),
-		config.KeyOpenAIBaseURL:      os.Getenv("OPENAI_BASE_URL"),
-		config.KeyOpenAIModel:        os.Getenv("OPENAI_MODEL"),
-		config.KeyUpstreamRepo:       envOr("UPSTREAM_REPO", "Team-Haruki/haruki-sekai-master"),
-		config.KeyUpstreamBranch:     envOr("UPSTREAM_BRANCH", "main"),
-		config.KeyUpstreamVersionURL: os.Getenv("UPSTREAM_VERSION_URL"),
-		config.KeySchedulerOn:        envOr("TRANSLATE_SCHEDULER_ENABLED", "true"),
-		config.KeyBackupGitRepoURL:   os.Getenv("GIT_PUSH_REPO_URL"),
-		config.KeyBackupGitBranch:    envOr("GIT_PUSH_BRANCH", "backup-translations"),
-		config.KeyBackupS3Bucket:     os.Getenv("BACKUP_S3_BUCKET"),
-		config.KeyBackupS3Region:     os.Getenv("BACKUP_S3_REGION"),
-		config.KeyBackupS3Endpoint:   os.Getenv("BACKUP_S3_ENDPOINT"),
-		config.KeyBackupS3AccessKey:  os.Getenv("BACKUP_S3_ACCESS_KEY"),
-		config.KeyBackupS3SecretKey:  os.Getenv("BACKUP_S3_SECRET_KEY"),
+		config.KeyLLMType:                         os.Getenv("LLM_TYPE"),
+		config.KeyGeminiAPIKey:                    os.Getenv("GEMINI_API_KEY"),
+		config.KeyGeminiModel:                     os.Getenv("GEMINI_MODEL"),
+		config.KeyOpenAIAPIKey:                    os.Getenv("OPENAI_API_KEY"),
+		config.KeyOpenAIBaseURL:                   os.Getenv("OPENAI_BASE_URL"),
+		config.KeyOpenAIModel:                     os.Getenv("OPENAI_MODEL"),
+		config.KeyUpstreamRepo:                    envOr("UPSTREAM_REPO", "Team-Haruki/haruki-sekai-master"),
+		config.KeyUpstreamBranch:                  envOr("UPSTREAM_BRANCH", "main"),
+		config.KeyUpstreamVersionURL:              os.Getenv("UPSTREAM_VERSION_URL"),
+		config.KeyUpstreamVersionFallbackURL:      os.Getenv("UPSTREAM_VERSION_FALLBACK_URL"),
+		config.KeyUpstreamJPMasterdataURL:         os.Getenv("UPSTREAM_JP_MASTERDATA_URL"),
+		config.KeyUpstreamJPMasterdataFallbackURL: os.Getenv("UPSTREAM_JP_MASTERDATA_FALLBACK_URL"),
+		config.KeyUpstreamCNMasterdataURL:         os.Getenv("UPSTREAM_CN_MASTERDATA_URL"),
+		config.KeyUpstreamCNMasterdataFallbackURL: os.Getenv("UPSTREAM_CN_MASTERDATA_FALLBACK_URL"),
+		config.KeyUpstreamJPAssetsURL:             os.Getenv("UPSTREAM_JP_ASSETS_URL"),
+		config.KeyUpstreamJPAssetsFallbackURL:     os.Getenv("UPSTREAM_JP_ASSETS_FALLBACK_URL"),
+		config.KeyUpstreamCNAssetsURL:             os.Getenv("UPSTREAM_CN_ASSETS_URL"),
+		config.KeyUpstreamCNAssetsFallbackURL:     os.Getenv("UPSTREAM_CN_ASSETS_FALLBACK_URL"),
+		config.KeyUpstreamFetchConcurrency:        os.Getenv("UPSTREAM_FETCH_CONCURRENCY"),
+		config.KeySchedulerOn:                     envOr("TRANSLATE_SCHEDULER_ENABLED", "true"),
+		config.KeyBackupGitRepoURL:                os.Getenv("GIT_PUSH_REPO_URL"),
+		config.KeyBackupGitBranch:                 envOr("GIT_PUSH_BRANCH", "backup-translations"),
+		config.KeyBackupS3Bucket:                  os.Getenv("BACKUP_S3_BUCKET"),
+		config.KeyBackupS3Region:                  os.Getenv("BACKUP_S3_REGION"),
+		config.KeyBackupS3Endpoint:                os.Getenv("BACKUP_S3_ENDPOINT"),
+		config.KeyBackupS3AccessKey:               os.Getenv("BACKUP_S3_ACCESS_KEY"),
+		config.KeyBackupS3SecretKey:               os.Getenv("BACKUP_S3_SECRET_KEY"),
 	}
 	seeded := 0
 	for k, v := range seed {

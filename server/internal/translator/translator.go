@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"moesekai/server/internal/config"
+	"moesekai/server/internal/httpx"
 	"moesekai/server/internal/model"
 	"moesekai/server/internal/store"
 )
@@ -58,7 +59,7 @@ func New(s *store.Store, es *store.EventStore, cfg *config.Config) *Translator {
 		store:      s,
 		eventStore: es,
 		cfg:        cfg,
-		client:     &http.Client{Timeout: 60 * time.Second},
+		client:     httpx.NewClient(60 * time.Second),
 	}
 }
 
@@ -178,10 +179,53 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 		{"music", t.extractMusic},
 	}
 
+	// Remote extraction is read-only and independent per category. Fetch a
+	// bounded number in parallel, then apply results to SQLite in the stable
+	// category order below. This keeps database writes serialized while avoiding
+	// dozens of latency-bound HTTP requests running one after another.
+	type stepResult struct {
+		fields map[string]store.CNApplyField
+		err    error
+	}
+	fetched := make([]stepResult, len(steps))
+	jobs := make(chan int)
+	done := make(chan int, len(steps))
+	workers := t.fetchConcurrency()
+	if workers > len(steps) {
+		workers = len(steps)
+	}
+	var fetchWG sync.WaitGroup
+	for range workers {
+		fetchWG.Add(1)
+		go func() {
+			defer fetchWG.Done()
+			for i := range jobs {
+				fetched[i].fields, fetched[i].err = steps[i].fn()
+				done <- i
+			}
+		}()
+	}
+	go func() {
+		for i := range steps {
+			jobs <- i
+		}
+		close(jobs)
+		fetchWG.Wait()
+		close(done)
+	}()
+
+	progressTotal := len(steps)*2 + 2
+	t.setNote("cn-sync fetching masterdata")
+	fetchedCount := 0
+	for i := range done {
+		fetchedCount++
+		t.emit("sync.progress", "已拉取 "+steps[i].category, fetchedCount, progressTotal)
+	}
+
 	for i, step := range steps {
 		t.setNote(fmt.Sprintf("cn-sync %d/%d: %s", i+1, len(steps), step.category))
-		t.emit("sync.progress", "正在更新 "+step.category, i+1, len(steps)+1)
-		fields, err := step.fn()
+		t.emit("sync.progress", "正在写入 "+step.category, len(steps)+i+1, progressTotal)
+		fields, err := fetched[i].fields, fetched[i].err
 		if err != nil {
 			if isTransientErr(err) {
 				result.Skipped = append(result.Skipped, step.category)
@@ -200,8 +244,9 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 	}
 
 	t.setNote("cn-sync event stories")
-	t.emit("sync.progress", "正在更新活动剧情", len(steps)+1, len(steps)+1)
-	storyCount, err := t.syncEventStoriesCNOnly()
+	storyProgress := progressTotal - 1
+	t.emit("sync.progress", "正在更新活动剧情", storyProgress, progressTotal)
+	storyCount, storyFetchFailures, err := t.syncEventStoriesCNOnly(storyProgress, progressTotal)
 	if err != nil {
 		if isTransientErr(err) {
 			result.Skipped = append(result.Skipped, "eventStories")
@@ -211,8 +256,11 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 		}
 	} else {
 		result.EventStoryFiles = storyCount
+		if storyFetchFailures > 0 {
+			result.Skipped = append(result.Skipped, "eventStories")
+		}
 	}
-	t.emit("sync.progress", "数据更新完成", len(steps)+1, len(steps)+1)
+	t.emit("sync.progress", "数据更新完成", progressTotal, progressTotal)
 	return result, nil
 }
 

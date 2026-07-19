@@ -28,6 +28,16 @@ const UPSTREAM_KEYS = [
   ["upstream.repo", "上游仓库 (owner/repo)"],
   ["upstream.branch", "上游分支"],
   ["upstream.version_url", "版本检测 URL"],
+  ["upstream.version_fallback_url", "版本检测备用 URL"],
+  ["upstream.jp_masterdata_url", "JP Masterdata URL"],
+  ["upstream.jp_masterdata_fallback_url", "JP Masterdata 备用 URL"],
+  ["upstream.cn_masterdata_url", "CN Masterdata URL"],
+  ["upstream.cn_masterdata_fallback_url", "CN Masterdata 备用 URL"],
+  ["upstream.jp_assets_url", "JP 剧情资源 URL"],
+  ["upstream.jp_assets_fallback_url", "JP 剧情资源备用 URL"],
+  ["upstream.cn_assets_url", "CN 剧情资源 URL"],
+  ["upstream.cn_assets_fallback_url", "CN 剧情资源备用 URL"],
+  ["upstream.fetch_concurrency", "并发下载数 (1-12)"],
   ["scheduler.enabled", "启用自动检测 (true/false)"],
 ] as const;
 
@@ -47,6 +57,8 @@ const BACKUP_KEYS = [
 
 // Per-key help text rendered below the relevant input.
 const SETTING_HINTS: Record<string, React.ReactNode> = {
+  "upstream.jp_assets_url": <>留空使用 <code>https://assets.unipjsk.com/ondemand</code>。旧 snowyassets 源持续返回 HTTP 525，不再作为默认源。</>,
+  "upstream.fetch_concurrency": <>留空默认 4；低内存实例建议 2-4。</>,
   "backup.git.repo_url": (
     <>
       私有仓库需要把访问令牌写进 URL，格式：
@@ -204,12 +216,16 @@ function UpstreamCard({ show }: { show: ShowFn }) {
           <tbody>
             <tr><th>仓库</th><td>{status.repo}@{status.branch}</td></tr>
             <tr><th>检测源</th><td>{status.versionURL || "—"}</td></tr>
+            {status.versionFallbackURL && <tr><th>备用检测源</th><td>{status.versionFallbackURL}</td></tr>}
+            {status.lastSource && <tr><th>实际使用源</th><td>{status.lastSource}</td></tr>}
             <tr><th>当前 dataVersion</th><td>{status.lastDataVersion || "—"}</td></tr>
             <tr><th>上次检查</th><td>{status.lastCheck || "—"}</td></tr>
+            <tr><th>上次成功</th><td>{status.lastSuccess || "—"}</td></tr>
             <tr><th>上次同步</th><td>{status.lastSync || "—"}</td></tr>
+            {!!status.consecutiveFailures && <tr><th>连续失败</th><td>{status.consecutiveFailures}</td></tr>}
             {status.rateLimitedUntil && <tr><th>限流冷却</th><td>{status.rateLimitedUntil}</td></tr>}
             <tr><th>Git 镜像</th><td>{status.gitMirrorReady ? "就绪" : "未启用"}</td></tr>
-            {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}</td></tr>}
+            {status.lastError && <tr><th>错误</th><td style={{ color: "var(--err)" }}>{status.lastError}{status.lastErrorAt ? ` (${status.lastErrorAt})` : ""}</td></tr>}
           </tbody>
         </table>
       )}
