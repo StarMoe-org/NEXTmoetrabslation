@@ -32,8 +32,15 @@ const (
 	maxRetryAfterCooldown     = 24 * time.Hour
 	maxFallbackCooldown       = 6 * time.Hour
 	defaultVersionURL         = "https://metadata.pjsk.moe/jp/versions/current_version.json"
-	defaultVersionFallbackURL = "https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json"
+	defaultVersionFallbackURL = "https://raw.githubusercontent.com/{repo}/{branch}/versions/current_version.json"
 )
+
+var builtInVersionFallbackURLs = []string{
+	"https://raw.githubusercontent.com/{repo}/{branch}/versions/current_version.json",
+	"https://fastly.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json",
+	"https://gcore.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json",
+	"https://cdn.jsdelivr.net/gh/{repo}@{branch}/versions/current_version.json",
+}
 
 // VersionInfo is the subset of current_version.json we care about.
 type VersionInfo struct {
@@ -47,22 +54,23 @@ type SyncFn func() error
 
 // Status reports the watcher's state for the admin UI.
 type Status struct {
-	Enabled             bool   `json:"enabled"`
-	Repo                string `json:"repo"`
-	Branch              string `json:"branch"`
-	VersionURL          string `json:"versionURL,omitempty"`
-	VersionFallbackURL  string `json:"versionFallbackURL,omitempty"`
-	LastSource          string `json:"lastSource,omitempty"`
-	LastCheck           string `json:"lastCheck,omitempty"`
-	LastSuccess         string `json:"lastSuccess,omitempty"`
-	LastDataVersion     string `json:"lastDataVersion,omitempty"`
-	ChangeDetectedAt    string `json:"changeDetectedAt,omitempty"`
-	LastSync            string `json:"lastSync,omitempty"`
-	LastError           string `json:"lastError,omitempty"`
-	LastErrorAt         string `json:"lastErrorAt,omitempty"`
-	ConsecutiveFailures int    `json:"consecutiveFailures,omitempty"`
-	RateLimitedUntil    string `json:"rateLimitedUntil,omitempty"`
-	GitMirrorReady      bool   `json:"gitMirrorReady"`
+	Enabled             bool     `json:"enabled"`
+	Repo                string   `json:"repo"`
+	Branch              string   `json:"branch"`
+	VersionURL          string   `json:"versionURL,omitempty"`
+	VersionFallbackURL  string   `json:"versionFallbackURL,omitempty"`
+	VersionFallbackURLs []string `json:"versionFallbackURLs,omitempty"`
+	LastSource          string   `json:"lastSource,omitempty"`
+	LastCheck           string   `json:"lastCheck,omitempty"`
+	LastSuccess         string   `json:"lastSuccess,omitempty"`
+	LastDataVersion     string   `json:"lastDataVersion,omitempty"`
+	ChangeDetectedAt    string   `json:"changeDetectedAt,omitempty"`
+	LastSync            string   `json:"lastSync,omitempty"`
+	LastError           string   `json:"lastError,omitempty"`
+	LastErrorAt         string   `json:"lastErrorAt,omitempty"`
+	ConsecutiveFailures int      `json:"consecutiveFailures,omitempty"`
+	RateLimitedUntil    string   `json:"rateLimitedUntil,omitempty"`
+	GitMirrorReady      bool     `json:"gitMirrorReady"`
 }
 
 // Watcher polls current_version.json and triggers sync on dataVersion change.
@@ -120,15 +128,25 @@ func (w *Watcher) versionURLs() []string {
 	repo := w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
 	branch := w.cfg.GetOr(config.KeyUpstreamBranch, "main")
 	primary := expandVersionURL(w.cfg.Get(config.KeyUpstreamVersionURL), repo, branch)
-	fallback := expandVersionTemplate(
-		w.cfg.GetOr(config.KeyUpstreamVersionFallbackURL, defaultVersionFallbackURL),
-		repo, branch,
-	)
+	fallbackSetting := w.cfg.GetOr(config.KeyUpstreamVersionFallbackURL, defaultVersionFallbackURL)
+	templates := append(splitVersionTemplates(fallbackSetting), builtInVersionFallbackURLs...)
 	urls := []string{primary}
-	if fallback != "" && fallback != primary {
-		urls = append(urls, fallback)
+	seen := map[string]bool{primary: true}
+	for _, tmpl := range templates {
+		url := expandVersionTemplate(tmpl, repo, branch)
+		if url == "" || seen[url] {
+			continue
+		}
+		seen[url] = true
+		urls = append(urls, url)
 	}
 	return urls
+}
+
+func splitVersionTemplates(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
 }
 
 func expandVersionURL(tmpl, repo, branch string) string {
@@ -157,11 +175,7 @@ func (w *Watcher) Start() {
 		s.Enabled = true
 		s.Repo = w.cfg.GetOr(config.KeyUpstreamRepo, "Team-Haruki/haruki-sekai-master")
 		s.Branch = w.cfg.GetOr(config.KeyUpstreamBranch, "main")
-		s.VersionURL = w.versionURL()
-		urls := w.versionURLs()
-		if len(urls) > 1 {
-			s.VersionFallbackURL = urls[1]
-		}
+		w.updateStatusSources(s)
 	})
 	if w.useGit {
 		go w.ensureGitMirror()
@@ -181,6 +195,21 @@ func (w *Watcher) setStatus(fn func(*Status)) {
 	w.mu.Lock()
 	fn(&w.status)
 	w.mu.Unlock()
+}
+
+func (w *Watcher) updateStatusSources(s *Status) {
+	urls := w.versionURLs()
+	s.VersionURL = ""
+	s.VersionFallbackURL = ""
+	s.VersionFallbackURLs = nil
+	if len(urls) == 0 {
+		return
+	}
+	s.VersionURL = urls[0]
+	if len(urls) > 1 {
+		s.VersionFallbackURL = urls[1]
+		s.VersionFallbackURLs = append([]string(nil), urls[1:]...)
+	}
 }
 
 func (w *Watcher) loop() {
@@ -245,13 +274,7 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 			s.LastError = err.Error()
 			s.LastErrorAt = checkedAt
 			s.ConsecutiveFailures++
-			s.VersionURL = w.versionURL()
-			urls := w.versionURLs()
-			if len(urls) > 1 {
-				s.VersionFallbackURL = urls[1]
-			} else {
-				s.VersionFallbackURL = ""
-			}
+			w.updateStatusSources(s)
 		})
 		return false, err
 	}
@@ -262,14 +285,8 @@ func (w *Watcher) fetchAndCompare() (bool, error) {
 		s.LastError = ""
 		s.LastErrorAt = ""
 		s.ConsecutiveFailures = 0
-		s.VersionURL = w.versionURL()
+		w.updateStatusSources(s)
 		s.LastSource = sourceURL
-		urls := w.versionURLs()
-		if len(urls) > 1 {
-			s.VersionFallbackURL = urls[1]
-		} else {
-			s.VersionFallbackURL = ""
-		}
 		if s.LastDataVersion != "" && s.LastDataVersion != info.DataVersion {
 			changed = true
 			s.ChangeDetectedAt = checkedAt
@@ -294,30 +311,62 @@ func (w *Watcher) fetchVersion() (VersionInfo, string, error) {
 	}
 
 	type failedSource struct {
+		sourceURL  string
 		err        error
 		retryAfter string
 	}
-	var failures []failedSource
-	var retryable []string
-	for _, sourceURL := range w.versionURLs() {
-		fetched, retryAfter, err := w.fetchVersionURL(sourceURL)
-		if err == nil {
-			return fetched, sourceURL, nil
+	type fetchResult struct {
+		info       VersionInfo
+		sourceURL  string
+		retryAfter string
+		err        error
+	}
+	runRound := func(urls []string) (VersionInfo, string, []failedSource, bool) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		results := make(chan fetchResult, len(urls))
+		for _, sourceURL := range urls {
+			go func() {
+				fetched, retryAfter, err := w.fetchVersionURL(ctx, sourceURL)
+				results <- fetchResult{info: fetched, sourceURL: sourceURL, retryAfter: retryAfter, err: err}
+			}()
 		}
-		failures = append(failures, failedSource{err: err, retryAfter: retryAfter})
-		if isRetryableVersionError(err) {
-			retryable = append(retryable, sourceURL)
+		failures := make([]failedSource, 0, len(urls))
+		for range urls {
+			result := <-results
+			if result.err == nil {
+				cancel()
+				return result.info, result.sourceURL, failures, true
+			}
+			failures = append(failures, failedSource{
+				sourceURL: result.sourceURL,
+				err:       result.err, retryAfter: result.retryAfter,
+			})
 		}
+		return VersionInfo{}, "", failures, false
 	}
 
+	urls := w.versionURLs()
+	fetched, sourceURL, failures, ok := runRound(urls)
+	if ok {
+		return fetched, sourceURL, nil
+	}
+
+	var retryable []string
+	for _, failure := range failures {
+		if isRetryableVersionError(failure.err) {
+			retryable = append(retryable, failure.sourceURL)
+		}
+	}
 	if len(retryable) > 0 {
 		time.Sleep(500 * time.Millisecond)
-		for _, sourceURL := range retryable {
-			fetched, retryAfter, err := w.fetchVersionURL(sourceURL)
-			if err == nil {
-				return fetched, sourceURL, nil
-			}
-			failures = append(failures, failedSource{err: fmt.Errorf("retry: %w", err), retryAfter: retryAfter})
+		fetched, sourceURL, retryFailures, ok := runRound(retryable)
+		if ok {
+			return fetched, sourceURL, nil
+		}
+		for _, failure := range retryFailures {
+			failure.err = fmt.Errorf("retry: %w", failure.err)
+			failures = append(failures, failure)
 		}
 	}
 
@@ -336,10 +385,10 @@ func (w *Watcher) fetchVersion() (VersionInfo, string, error) {
 	return info, "", fmt.Errorf("all version sources failed: %s", strings.Join(parts, "; "))
 }
 
-func (w *Watcher) fetchVersionURL(sourceURL string) (VersionInfo, string, error) {
+func (w *Watcher) fetchVersionURL(ctx context.Context, sourceURL string) (VersionInfo, string, error) {
 	var info VersionInfo
 	etag, lastModified, cached, _ := w.fetchState(sourceURL)
-	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return info, "", err
 	}

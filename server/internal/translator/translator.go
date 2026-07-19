@@ -27,6 +27,7 @@ type Translator struct {
 	eventStore *store.EventStore
 	cfg        *config.Config
 	client     *http.Client
+	hedgeDelay time.Duration
 
 	mu       sync.Mutex
 	status   Status
@@ -60,6 +61,7 @@ func New(s *store.Store, es *store.EventStore, cfg *config.Config) *Translator {
 		eventStore: es,
 		cfg:        cfg,
 		client:     httpx.NewClient(60 * time.Second),
+		hedgeDelay: defaultSourceHedgeDelay,
 	}
 }
 

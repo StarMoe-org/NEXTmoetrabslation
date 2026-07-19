@@ -6,6 +6,7 @@ package translator
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,9 +31,11 @@ const (
 	defaultJPAssetsFallbackURL = ""
 	defaultCNAssetsURL         = "https://sekai-assets-bdf29c81.seiunx.net/cn-assets/ondemand"
 	defaultCNAssetsFallbackURL = ""
+	defaultSourceHedgeDelay    = 2 * time.Second
 )
 
 type sourceFailure struct {
+	url string
 	err error
 }
 
@@ -125,6 +128,13 @@ func (t *Translator) fetchConcurrency() int {
 	return n
 }
 
+func (t *Translator) fetchHedgeDelay() time.Duration {
+	if t.hedgeDelay > 0 {
+		return t.hedgeDelay
+	}
+	return defaultSourceHedgeDelay
+}
+
 // fetchJSONURL fetches and decodes JSON. Transient failures are retried once;
 // source-chain callers try every configured mirror before retrying a failed
 // source, so a dead primary cannot block a healthy fallback for minutes.
@@ -146,34 +156,118 @@ func (t *Translator) fetchJSONURLs(urls []string) (any, error) {
 		return nil, fmt.Errorf("no upstream source configured")
 	}
 
-	failures := make([]sourceFailure, 0, len(urls)*2)
-	retryable := make([]string, 0, len(urls))
-	for _, url := range urls {
-		result, err := t.fetchJSONURLOnce(url)
-		if err == nil {
-			return result, nil
-		}
-		failures = append(failures, sourceFailure{err: err})
-		if isTransientErr(err) {
-			retryable = append(retryable, url)
-		}
+	result, failures, ok := t.fetchJSONRound(urls)
+	if ok {
+		return result, nil
 	}
 
+	retryable := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if isTransientErr(failure.err) {
+			retryable = append(retryable, failure.url)
+		}
+	}
 	if len(retryable) > 0 {
 		time.Sleep(500 * time.Millisecond)
-		for _, url := range retryable {
-			result, err := t.fetchJSONURLOnce(url)
-			if err == nil {
-				return result, nil
-			}
-			failures = append(failures, sourceFailure{err: fmt.Errorf("retry: %w", err)})
+		result, retryFailures, ok := t.fetchJSONRound(dedupeURLs(retryable))
+		if ok {
+			return result, nil
+		}
+		for _, failure := range retryFailures {
+			failure.err = fmt.Errorf("retry: %w", failure.err)
+			failures = append(failures, failure)
 		}
 	}
 	return nil, joinSourceFailures(failures)
 }
 
+func (t *Translator) fetchJSONRound(urls []string) (any, []sourceFailure, bool) {
+	type fetchResult struct {
+		url  string
+		data any
+		err  error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results := make(chan fetchResult, len(urls))
+	next, active := 0, 0
+	start := func(url string) {
+		active++
+		go func() {
+			data, err := t.fetchJSONURLOnceContext(ctx, url)
+			results <- fetchResult{url: url, data: data, err: err}
+		}()
+	}
+	if len(urls) > 0 {
+		start(urls[0])
+		next = 1
+	}
+
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerC = nil
+	}
+	scheduleNext := func() {
+		stopTimer()
+		if next < len(urls) && active > 0 {
+			timer = time.NewTimer(t.fetchHedgeDelay())
+			timerC = timer.C
+		}
+	}
+	scheduleNext()
+	defer stopTimer()
+
+	failures := make([]sourceFailure, 0, len(urls))
+	for active > 0 || next < len(urls) {
+		if active == 0 && next < len(urls) {
+			stopTimer()
+			start(urls[next])
+			next++
+			scheduleNext()
+			continue
+		}
+		select {
+		case result := <-results:
+			active--
+			if result.err == nil {
+				cancel()
+				return result.data, failures, true
+			}
+			failures = append(failures, sourceFailure{url: result.url, err: result.err})
+			if active == 0 && next < len(urls) {
+				stopTimer()
+				start(urls[next])
+				next++
+				scheduleNext()
+			}
+		case <-timerC:
+			timerC = nil
+			if next < len(urls) {
+				start(urls[next])
+				next++
+				scheduleNext()
+			}
+		}
+	}
+	return nil, failures, false
+}
+
 func (t *Translator) fetchJSONURLOnce(url string) (any, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	return t.fetchJSONURLOnceContext(context.Background(), url)
+}
+
+func (t *Translator) fetchJSONURLOnceContext(ctx context.Context, url string) (any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +324,7 @@ func (t *Translator) fetchJPScenarioJSON(assetPath string) (any, error) {
 			incomplete = result
 			err = fmt.Errorf("GET %s: missing TalkData", url)
 		}
-		failures = append(failures, sourceFailure{err: err})
+		failures = append(failures, sourceFailure{url: url, err: err})
 		if isTransientErr(err) {
 			retryable = append(retryable, url)
 		}
@@ -246,7 +340,7 @@ func (t *Translator) fetchJPScenarioJSON(assetPath string) (any, error) {
 				incomplete = result
 				err = fmt.Errorf("GET %s: missing TalkData", url)
 			}
-			failures = append(failures, sourceFailure{err: fmt.Errorf("retry: %w", err)})
+			failures = append(failures, sourceFailure{url: url, err: fmt.Errorf("retry: %w", err)})
 		}
 	}
 	if incomplete != nil {

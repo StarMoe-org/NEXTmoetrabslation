@@ -57,6 +57,7 @@ const BACKUP_KEYS = [
 
 // Per-key help text rendered below the relevant input.
 const SETTING_HINTS: Record<string, React.ReactNode> = {
+  "upstream.version_fallback_url": <>可填写多个 URL，用逗号分隔；系统还会自动追加 GitHub Raw、Fastly、Gcore 和 jsDelivr 救援源。</>,
   "upstream.jp_assets_url": <>留空使用 <code>https://assets.unipjsk.com/ondemand</code>。旧 snowyassets 源持续返回 HTTP 525，不再作为默认源。</>,
   "upstream.fetch_concurrency": <>留空默认 4；低内存实例建议 2-4。</>,
   "backup.git.repo_url": (
@@ -216,7 +217,7 @@ function UpstreamCard({ show }: { show: ShowFn }) {
           <tbody>
             <tr><th>仓库</th><td>{status.repo}@{status.branch}</td></tr>
             <tr><th>检测源</th><td>{status.versionURL || "—"}</td></tr>
-            {status.versionFallbackURL && <tr><th>备用检测源</th><td>{status.versionFallbackURL}</td></tr>}
+            {!!status.versionFallbackURLs?.length && <tr><th>备用检测源</th><td>{status.versionFallbackURLs.join(" · ")}</td></tr>}
             {status.lastSource && <tr><th>实际使用源</th><td>{status.lastSource}</td></tr>}
             <tr><th>当前 dataVersion</th><td>{status.lastDataVersion || "—"}</td></tr>
             <tr><th>上次检查</th><td>{status.lastCheck || "—"}</td></tr>

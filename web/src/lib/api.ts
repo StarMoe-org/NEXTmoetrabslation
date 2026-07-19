@@ -76,6 +76,7 @@ export interface UpstreamStatus {
   branch?: string;
   versionURL?: string;
   versionFallbackURL?: string;
+  versionFallbackURLs?: string[];
   lastSource?: string;
   lastCheck?: string;
   lastSuccess?: string;

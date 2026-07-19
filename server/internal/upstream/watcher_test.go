@@ -74,6 +74,10 @@ func TestExpandVersionURLTemplate(t *testing.T) {
 }
 
 func TestFetchVersionFallsBackToSecondarySource(t *testing.T) {
+	oldBuiltIns := builtInVersionFallbackURLs
+	builtInVersionFallbackURLs = nil
+	t.Cleanup(func() { builtInVersionFallbackURLs = oldBuiltIns })
+
 	primaryCalls := 0
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		primaryCalls++
@@ -107,6 +111,43 @@ func TestFetchVersionFallsBackToSecondarySource(t *testing.T) {
 	}
 	if primaryCalls != 1 || fallbackCalls != 1 {
 		t.Fatalf("unexpected calls: primary=%d fallback=%d", primaryCalls, fallbackCalls)
+	}
+}
+
+func TestSplitVersionTemplates(t *testing.T) {
+	got := splitVersionTemplates("https://one.example/a, https://two.example/b\nhttps://three.example/c")
+	if len(got) != 3 {
+		t.Fatalf("unexpected templates: %v", got)
+	}
+}
+
+func TestFetchVersionRacesSlowPrimary(t *testing.T) {
+	oldBuiltIns := builtInVersionFallbackURLs
+	builtInVersionFallbackURLs = nil
+	t.Cleanup(func() { builtInVersionFallbackURLs = oldBuiltIns })
+
+	primary := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"dataVersion":"fast"}`)
+	}))
+	defer fallback.Close()
+
+	cfg := openWatcherConfig(t)
+	cfg.Set(config.KeyUpstreamVersionURL, primary.URL)
+	cfg.Set(config.KeyUpstreamVersionFallbackURL, fallback.URL)
+	w := New(cfg, nil, Options{})
+
+	started := time.Now()
+	info, source, err := w.fetchVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.DataVersion != "fast" || source != fallback.URL || time.Since(started) > time.Second {
+		t.Fatalf("slow primary was not raced: info=%+v source=%q elapsed=%s", info, source, time.Since(started))
 	}
 }
 

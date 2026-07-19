@@ -172,6 +172,44 @@ func TestMasterdataFallsBackToSecondarySource(t *testing.T) {
 	}
 }
 
+func TestMasterdataHedgesSlowPrimary(t *testing.T) {
+	primaryStarted := make(chan struct{}, 1)
+	primary := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case primaryStarted <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer primary.Close()
+
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":1}]`)
+	}))
+	defer fallback.Close()
+
+	cfg := openTranslatorConfig(t)
+	cfg.Set(config.KeyUpstreamJPMasterdataURL, primary.URL)
+	cfg.Set(config.KeyUpstreamJPMasterdataFallbackURL, fallback.URL)
+	tr := New(nil, nil, cfg)
+	tr.hedgeDelay = 20 * time.Millisecond
+
+	started := time.Now()
+	items, err := tr.fetchMasterdata("events.json", "jp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || time.Since(started) > time.Second {
+		t.Fatalf("slow primary was not hedged promptly: items=%v elapsed=%s", items, time.Since(started))
+	}
+	select {
+	case <-primaryStarted:
+	default:
+		t.Fatal("primary source was not attempted")
+	}
+}
+
 func TestBuildJPPendingEpisodesFetchesConcurrently(t *testing.T) {
 	var active atomic.Int32
 	var maxActive atomic.Int32
