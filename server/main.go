@@ -87,8 +87,8 @@ func main() {
 		if err != nil {
 			return err
 		}
-		if len(result.Skipped) > 0 {
-			return fmt.Errorf("data sync skipped: %s", strings.Join(result.Skipped, ", "))
+		if warning := result.SkippedError(); warning != nil {
+			return warning
 		}
 		return nil
 	}, upstream.Options{
@@ -162,6 +162,10 @@ func seedConfigFromEnv(cfg *config.Config) {
 		config.KeyOpenAIAPIKey:                    os.Getenv("OPENAI_API_KEY"),
 		config.KeyOpenAIBaseURL:                   os.Getenv("OPENAI_BASE_URL"),
 		config.KeyOpenAIModel:                     os.Getenv("OPENAI_MODEL"),
+		config.KeyLLMRequestTimeoutMS:             envOr("LLM_REQUEST_TIMEOUT_MS", "45000"),
+		config.KeyLLMMaxRetries:                   envOr("LLM_MAX_RETRIES", "2"),
+		config.KeyBatchSize:                       envOr("TRANSLATE_BATCH_SIZE", "20"),
+		config.KeyRateDelayMS:                     envOr("TRANSLATE_RATE_DELAY_MS", "800"),
 		config.KeyUpstreamRepo:                    envOr("UPSTREAM_REPO", "Team-Haruki/haruki-sekai-master"),
 		config.KeyUpstreamBranch:                  envOr("UPSTREAM_BRANCH", "main"),
 		config.KeyUpstreamVersionURL:              os.Getenv("UPSTREAM_VERSION_URL"),

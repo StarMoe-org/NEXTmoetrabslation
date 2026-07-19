@@ -20,6 +20,8 @@ const LLM_KEYS = [
   ["llm.openai.key", "OpenAI API Key"],
   ["llm.openai.base_url", "OpenAI Base URL"],
   ["llm.openai.model", "OpenAI 模型"],
+  ["llm.request_timeout_ms", "单次请求超时 (ms)"],
+  ["llm.max_retries", "失败重试次数 (0-5)"],
   ["translate.batch_size", "批大小"],
   ["translate.rate_delay_ms", "速率延迟 (ms)"],
 ] as const;
@@ -57,6 +59,8 @@ const BACKUP_KEYS = [
 
 // Per-key help text rendered below the relevant input.
 const SETTING_HINTS: Record<string, React.ReactNode> = {
+  "llm.request_timeout_ms": <>默认 45000。每次请求到期后会自动取消，已完成批次仍会保留。</>,
+  "llm.max_retries": <>默认 2，即首次请求失败后最多再尝试 2 次。</>,
   "upstream.version_fallback_url": <>可填写多个 URL，用逗号分隔；系统还会自动追加 GitHub Raw、Fastly、Gcore 和 jsDelivr 救援源。</>,
   "upstream.jp_assets_url": <>留空使用 <code>https://assets.unipjsk.com/ondemand</code>。旧 snowyassets 源持续返回 HTTP 525，不再作为默认源。</>,
   "upstream.fetch_concurrency": <>留空默认 4；低内存实例建议 2-4。</>,

@@ -24,6 +24,13 @@ type builtEpisode struct {
 	speakerNames map[string]string
 }
 
+type eventStorySyncOutcome struct {
+	Processed            int
+	PartialErrors        []error
+	AITranslationSkipped int
+	AITranslationNote    string
+}
+
 // toOrdered converts built episodes (keyed by episode no) into the ordered
 // slice the EventStore import expects, sorted by numeric episode number.
 func toOrderedEpisodes(eps map[string]builtEpisode, lineSource string) []store.OrderedEpisode {
@@ -61,18 +68,19 @@ func atoiSafe(s string) int {
 // syncEventStoriesCNOnly mirrors the legacy strategy: walk JP stories from the
 // first not-yet-official event, write official CN where available, and on a
 // 3-event empty streak fall back to JP-pending + auto LLM for newer events.
-func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) (int, int, error) {
+func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) (eventStorySyncOutcome, error) {
+	outcome := eventStorySyncOutcome{}
 	jpStories, err := t.fetchMasterdata("eventStories.json", "jp")
 	if err != nil {
-		return 0, 0, err
+		return outcome, err
 	}
 	cnStories, err := t.fetchMasterdata("eventStories.json", "cn")
 	if err != nil {
-		return 0, 0, err
+		return outcome, err
 	}
 	cnEvents, err := t.fetchMasterdata("events.json", "cn")
 	if err != nil {
-		return 0, 0, err
+		return outcome, err
 	}
 	cnStoryByEvent := byIntID(cnStories, "eventId")
 	cnEventSet := map[int]bool{}
@@ -85,7 +93,7 @@ func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) 
 
 	states, localMax, err := t.eventStore.EventSyncStates()
 	if err != nil {
-		return 0, 0, err
+		return outcome, err
 	}
 	latestOfficialCN, firstLLM := 0, 0
 	for _, st := range states {
@@ -103,8 +111,6 @@ func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) 
 		startCN = latestOfficialCN + 1
 	}
 
-	processed := 0
-	scenarioFailures := 0
 	emptyStreak := 0
 	stoppedByEmpty := false
 	lastChecked := 0
@@ -131,9 +137,13 @@ func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) 
 
 		t.setNote(fmt.Sprintf("cn-sync event story %d", eventID))
 		t.emit("sync.progress", fmt.Sprintf("正在更新活动剧情 Event #%d", eventID), progressCurrent, progressTotal)
-		episodes, hasTalk, _, errs := t.buildOfficialCNEpisodes(jpStory, cnStoryByEvent[eventID])
-		if errs > 0 {
-			scenarioFailures += errs
+		episodes, hasTalk, _, episodeErrors := t.buildOfficialCNEpisodes(jpStory, cnStoryByEvent[eventID])
+		if len(episodeErrors) > 0 {
+			for _, episodeErr := range episodeErrors {
+				wrapped := fmt.Errorf("event %d: %w", eventID, episodeErr)
+				outcome.PartialErrors = append(outcome.PartialErrors, wrapped)
+				log.Printf("[translate] event story partial failure: %v", wrapped)
+			}
 			continue // scenario fetch failed; retry next round
 		}
 		if !hasTalk {
@@ -148,37 +158,40 @@ func (t *Translator) syncEventStoriesCNOnly(progressCurrent, progressTotal int) 
 
 		meta := model.EventStoryMeta{Source: "official_cn", Version: "1.0", LastUpdated: time.Now().Unix()}
 		if err := t.eventStore.ImportOrdered(eventID, meta, toOrderedEpisodes(episodes, "cn")); err != nil {
-			return processed, scenarioFailures, err
+			return outcome, err
 		}
 		states[eventID] = store.EventSyncState{EventID: eventID, Source: "official_cn", IsOfficialCN: true}
 		if eventID > localMax {
 			localMax = eventID
 		}
-		processed++
+		outcome.Processed++
 	}
 
 	if stoppedByEmpty {
 		fallbackStart := localMax + 1
 		log.Printf("[translate] event stories: CN empty streak at event %d, JP-pending fallback from %d", lastChecked, fallbackStart)
-		fp, fetchFailures, err := t.fillEventStoriesJPPending(jpStories, fallbackStart, states, progressCurrent, progressTotal)
+		fallbackOutcome, err := t.fillEventStoriesJPPending(jpStories, fallbackStart, states, progressCurrent, progressTotal)
 		if err != nil {
-			return processed, scenarioFailures, err
+			return outcome, err
 		}
-		processed += fp
-		scenarioFailures += fetchFailures
+		outcome.Processed += fallbackOutcome.Processed
+		outcome.PartialErrors = append(outcome.PartialErrors, fallbackOutcome.PartialErrors...)
+		outcome.AITranslationSkipped += fallbackOutcome.AITranslationSkipped
+		outcome.AITranslationNote = fallbackOutcome.AITranslationNote
 	}
-	return processed, scenarioFailures, nil
+	return outcome, nil
 }
 
 // buildOfficialCNEpisodes fetches JP + CN scenarios and pairs JP text to CN
 // translation by position. Returns (episodes, hasTalkData, hasTitleOnly, errors).
-func (t *Translator) buildOfficialCNEpisodes(jpStory, cnStory map[string]any) (map[string]builtEpisode, bool, bool, int) {
+func (t *Translator) buildOfficialCNEpisodes(jpStory, cnStory map[string]any) (map[string]builtEpisode, bool, bool, []error) {
 	asset := getString(jpStory, "assetbundleName")
 	jpEpisodes := toMapSlice(jpStory["eventStoryEpisodes"])
 	cnByEp := byIntID(toMapSlice(cnStory["eventStoryEpisodes"]), "episodeNo")
 
 	episodes := map[string]builtEpisode{}
-	hasTalk, hasTitleOnly, errs := false, false, 0
+	hasTalk, hasTitleOnly := false, false
+	var errs []error
 	type fetchResult struct {
 		ep         map[string]any
 		epNo       int
@@ -229,7 +242,7 @@ func (t *Translator) buildOfficialCNEpisodes(jpStory, cnStory map[string]any) (m
 
 	for fetched := range results {
 		if fetched.err != nil {
-			errs++
+			errs = append(errs, fmt.Errorf("episode %d (%s): %w", fetched.epNo, fetched.scenarioID, fetched.err))
 			continue
 		}
 		ep, epNo, scenarioID := fetched.ep, fetched.epNo, fetched.scenarioID
@@ -291,11 +304,11 @@ func (t *Translator) buildOfficialCNEpisodes(jpStory, cnStory map[string]any) (m
 }
 
 // buildJPPendingEpisodes fetches JP-only scenario text (no CN), leaving cn empty.
-func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]builtEpisode, int) {
+func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]builtEpisode, []error) {
 	asset := getString(jpStory, "assetbundleName")
 	jpEpisodes := toMapSlice(jpStory["eventStoryEpisodes"])
 	episodes := map[string]builtEpisode{}
-	errs := 0
+	var errs []error
 	type fetchResult struct {
 		ep         map[string]any
 		epNo       int
@@ -342,7 +355,7 @@ func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]
 		ep, epNo, scenarioID := fetched.ep, fetched.epNo, fetched.scenarioID
 		title := strings.TrimSpace(getString(ep, "title"))
 		if fetched.err != nil {
-			errs++
+			errs = append(errs, fmt.Errorf("episode %d (%s): %w", epNo, scenarioID, fetched.err))
 			if title != "" {
 				episodes[strconv.Itoa(epNo)] = builtEpisode{
 					episodeNo: strconv.Itoa(epNo), scenarioID: scenarioID,
@@ -391,9 +404,13 @@ func (t *Translator) buildJPPendingEpisodes(jpStory map[string]any) (map[string]
 
 // fillEventStoriesJPPending writes JP-pending stories for new events and runs
 // auto LLM translation on them.
-func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, startEventID int, states map[int]store.EventSyncState, progressCurrent, progressTotal int) (int, int, error) {
-	processed := 0
-	fetchFailures := 0
+func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, startEventID int, states map[int]store.EventSyncState, progressCurrent, progressTotal int) (eventStorySyncOutcome, error) {
+	outcome := eventStorySyncOutcome{}
+	skipAI := false
+	if reason, unavailable := t.automaticLLMUnavailable(); unavailable {
+		skipAI = true
+		outcome.AITranslationNote = reason
+	}
 	for _, jpStory := range jpStories {
 		eventID := getInt(jpStory, "eventId")
 		if eventID < startEventID {
@@ -404,20 +421,35 @@ func (t *Translator) fillEventStoriesJPPending(jpStories []map[string]any, start
 		}
 		t.setNote(fmt.Sprintf("cn-sync JP-pending event story %d", eventID))
 		t.emit("sync.progress", fmt.Sprintf("正在拉取 JP 剧情 Event #%d", eventID), progressCurrent, progressTotal)
-		episodes, errs := t.buildJPPendingEpisodes(jpStory)
-		fetchFailures += errs
+		episodes, episodeErrors := t.buildJPPendingEpisodes(jpStory)
+		for _, episodeErr := range episodeErrors {
+			wrapped := fmt.Errorf("event %d: %w", eventID, episodeErr)
+			outcome.PartialErrors = append(outcome.PartialErrors, wrapped)
+			log.Printf("[translate] event story partial failure: %v", wrapped)
+		}
 		if len(episodes) == 0 {
 			continue
 		}
 		meta := model.EventStoryMeta{Source: "jp_pending", Version: "1.0", LastUpdated: time.Now().Unix()}
 		if err := t.eventStore.ImportOrdered(eventID, meta, toOrderedEpisodes(episodes, "unknown")); err != nil {
-			return processed, fetchFailures, err
+			return outcome, err
 		}
 		states[eventID] = store.EventSyncState{EventID: eventID, Source: "jp_pending"}
-		// Auto-translate the freshly written JP-pending story.
-		if _, err := t.autoTranslateEventStory(eventID); err == nil {
-			processed++
+		outcome.Processed++
+		if skipAI {
+			outcome.AITranslationSkipped++
+			continue
+		}
+		// Auto-translate the freshly written JP-pending story. Failure is
+		// optional: it does not discard imported data or fail the CN sync. Once
+		// unavailable, skip AI for the rest of this run and leave JP pending.
+		if translated, err := t.autoTranslateEventStory(eventID); err != nil {
+			skipAI = true
+			outcome.AITranslationSkipped++
+			outcome.AITranslationNote = fmt.Sprintf("Event #%d 自动 AI 翻译在保存 %d 条后暂停：%v", eventID, translated, err)
+			log.Printf("[translate] %s", outcome.AITranslationNote)
+			t.emit("sync.progress", fmt.Sprintf("Event #%d 已保存，LLM 不可用，已跳过后续 AI", eventID), progressCurrent, progressTotal)
 		}
 	}
-	return processed, fetchFailures, nil
+	return outcome, nil
 }

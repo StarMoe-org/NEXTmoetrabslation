@@ -26,12 +26,16 @@ type Translator struct {
 	store      *store.Store
 	eventStore *store.EventStore
 	cfg        *config.Config
-	client     *http.Client
+	dataClient *http.Client
+	llmClient  *http.Client
 	hedgeDelay time.Duration
 
 	mu       sync.Mutex
 	status   Status
 	progress ProgressFn
+
+	llmUnavailableUntil time.Time
+	llmLastError        string
 }
 
 // Status reports the translator's current run state.
@@ -45,22 +49,36 @@ type Status struct {
 
 // llmConfig is a snapshot of LLM settings for one operation.
 type llmConfig struct {
-	LLMType       string
-	GeminiAPIKey  string
-	GeminiModel   string
-	OpenAIAPIKey  string
-	OpenAIBaseURL string
-	OpenAIModel   string
-	BatchSize     int
-	RateDelay     time.Duration
+	LLMType        string
+	GeminiAPIKey   string
+	GeminiModel    string
+	OpenAIAPIKey   string
+	OpenAIBaseURL  string
+	OpenAIModel    string
+	RequestTimeout time.Duration
+	MaxRetries     int
+	BatchSize      int
+	RateDelay      time.Duration
 }
+
+const (
+	defaultDataRequestTimeout = 3 * time.Minute
+	defaultLLMRequestTimeout  = 45 * time.Second
+	defaultLLMMaxRetries      = 2
+	automaticLLMTimeout       = 30 * time.Second
+	llmFailureCooldown        = 10 * time.Minute
+)
 
 func New(s *store.Store, es *store.EventStore, cfg *config.Config) *Translator {
 	return &Translator{
 		store:      s,
 		eventStore: es,
 		cfg:        cfg,
-		client:     httpx.NewClient(60 * time.Second),
+		dataClient: httpx.NewClientWithTimeouts(defaultDataRequestTimeout, 15*time.Second, 25*time.Second, 45*time.Second),
+		// LLM calls use a live, per-request context timeout from config. Keeping
+		// the client timeout at zero prevents it from fighting that deadline,
+		// especially while an OpenAI-compatible SSE response is streaming.
+		llmClient:  httpx.NewClientWithTimeouts(0, 10*time.Second, 15*time.Second, 0),
 		hedgeDelay: defaultSourceHedgeDelay,
 	}
 }
@@ -76,15 +94,28 @@ func (t *Translator) emit(stage, detail string, cur, total int) {
 
 // snapshotConfig reads current LLM settings from the config store.
 func (t *Translator) snapshotConfig() llmConfig {
+	requestTimeout := time.Duration(t.cfg.GetInt(config.KeyLLMRequestTimeoutMS, int(defaultLLMRequestTimeout/time.Millisecond))) * time.Millisecond
+	if requestTimeout <= 0 {
+		requestTimeout = defaultLLMRequestTimeout
+	}
+	maxRetries := t.cfg.GetInt(config.KeyLLMMaxRetries, defaultLLMMaxRetries)
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if maxRetries > 5 {
+		maxRetries = 5
+	}
 	return llmConfig{
-		LLMType:       t.cfg.GetOr(config.KeyLLMType, "openai"),
-		GeminiAPIKey:  t.cfg.Get(config.KeyGeminiAPIKey),
-		GeminiModel:   t.cfg.GetOr(config.KeyGeminiModel, "gemini-2.0-flash"),
-		OpenAIAPIKey:  t.cfg.Get(config.KeyOpenAIAPIKey),
-		OpenAIBaseURL: t.cfg.GetOr(config.KeyOpenAIBaseURL, "https://api.openai.com/v1"),
-		OpenAIModel:   t.cfg.GetOr(config.KeyOpenAIModel, "gpt-4o-mini"),
-		BatchSize:     t.cfg.GetInt(config.KeyBatchSize, 20),
-		RateDelay:     time.Duration(t.cfg.GetInt(config.KeyRateDelayMS, 800)) * time.Millisecond,
+		LLMType:        t.cfg.GetOr(config.KeyLLMType, "openai"),
+		GeminiAPIKey:   t.cfg.Get(config.KeyGeminiAPIKey),
+		GeminiModel:    t.cfg.GetOr(config.KeyGeminiModel, "gemini-2.0-flash"),
+		OpenAIAPIKey:   t.cfg.Get(config.KeyOpenAIAPIKey),
+		OpenAIBaseURL:  t.cfg.GetOr(config.KeyOpenAIBaseURL, "https://api.openai.com/v1"),
+		OpenAIModel:    t.cfg.GetOr(config.KeyOpenAIModel, "gpt-4o-mini"),
+		RequestTimeout: requestTimeout,
+		MaxRetries:     maxRetries,
+		BatchSize:      t.cfg.GetInt(config.KeyBatchSize, 20),
+		RateDelay:      time.Duration(t.cfg.GetInt(config.KeyRateDelayMS, 800)) * time.Millisecond,
 	}
 }
 
@@ -92,6 +123,34 @@ func (t *Translator) Status() Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.status
+}
+
+func (t *Translator) recordLLMSuccess() {
+	t.mu.Lock()
+	t.llmUnavailableUntil = time.Time{}
+	t.llmLastError = ""
+	t.mu.Unlock()
+}
+
+func (t *Translator) recordLLMFailure(err error) {
+	if err == nil {
+		return
+	}
+	t.mu.Lock()
+	t.llmUnavailableUntil = time.Now().Add(llmFailureCooldown)
+	t.llmLastError = err.Error()
+	t.mu.Unlock()
+}
+
+func (t *Translator) automaticLLMUnavailable() (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.llmUnavailableUntil.IsZero() || !time.Now().Before(t.llmUnavailableUntil) {
+		t.llmUnavailableUntil = time.Time{}
+		t.llmLastError = ""
+		return "", false
+	}
+	return fmt.Sprintf("LLM 暂时不可用（冷却至 %s）：%s", t.llmUnavailableUntil.UTC().Format(time.RFC3339), t.llmLastError), true
 }
 
 // markStart claims the single-run lock, returning an error if already running.
@@ -139,11 +198,78 @@ func IsAlreadyRunning(err error) bool {
 
 // CNSyncResult summarizes a CN-sync run.
 type CNSyncResult struct {
-	Mode            string   `json:"mode"`
-	Categories      int      `json:"categories"`
-	UpdatedEntries  int      `json:"updatedEntries"`
-	EventStoryFiles int      `json:"eventStoryFiles"`
-	Skipped         []string `json:"skipped,omitempty"`
+	Mode                 string            `json:"mode"`
+	Categories           int               `json:"categories"`
+	UpdatedEntries       int               `json:"updatedEntries"`
+	EventStoryFiles      int               `json:"eventStoryFiles"`
+	AITranslationSkipped int               `json:"aiTranslationSkipped,omitempty"`
+	AITranslationNote    string            `json:"aiTranslationNote,omitempty"`
+	Skipped              []string          `json:"skipped,omitempty"`
+	SkippedDetails       map[string]string `json:"skippedDetails,omitempty"`
+}
+
+func (r *CNSyncResult) addSkipped(category string, err error) {
+	seen := false
+	for _, existing := range r.Skipped {
+		if existing == category {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		r.Skipped = append(r.Skipped, category)
+	}
+	if err == nil {
+		return
+	}
+	if r.SkippedDetails == nil {
+		r.SkippedDetails = map[string]string{}
+	}
+	r.SkippedDetails[category] = err.Error()
+	log.Printf("[translate] cn-sync skipped %s: %v", category, err)
+}
+
+// SkippedError returns a concise, actionable status error suitable for the
+// upstream watcher and management UI. Full details remain in SkippedDetails.
+func (r CNSyncResult) SkippedError() error {
+	if len(r.Skipped) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(r.Skipped))
+	for _, category := range r.Skipped {
+		part := category
+		if detail := strings.TrimSpace(r.SkippedDetails[category]); detail != "" {
+			part += ": " + truncateStatusDetail(detail, 280)
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Errorf("data sync skipped: %s", strings.Join(parts, "; "))
+}
+
+func truncateStatusDetail(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
+}
+
+func summarizeErrors(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	limit := len(errs)
+	if limit > 3 {
+		limit = 3
+	}
+	parts := make([]string, 0, limit)
+	for _, err := range errs[:limit] {
+		parts = append(parts, err.Error())
+	}
+	if len(errs) > limit {
+		parts = append(parts, fmt.Sprintf("另有 %d 个错误", len(errs)-limit))
+	}
+	return fmt.Errorf("%d 个剧情子任务失败: %s", len(errs), strings.Join(parts, "; "))
 }
 
 // SyncCNOnly fetches masterdata and applies official CN translations to all
@@ -158,6 +284,8 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 		note := "cn sync complete"
 		if runErr != nil {
 			note = "cn sync failed"
+		} else if result.AITranslationSkipped > 0 {
+			note = fmt.Sprintf("cn sync complete; skipped AI translation for %d event stories", result.AITranslationSkipped)
 		}
 		t.markEnd(note, runErr)
 	}()
@@ -230,7 +358,7 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 		fields, err := fetched[i].fields, fetched[i].err
 		if err != nil {
 			if isTransientErr(err) {
-				result.Skipped = append(result.Skipped, step.category)
+				result.addSkipped(step.category, err)
 				continue
 			}
 			runErr = fmt.Errorf("%s: %w", step.category, err)
@@ -248,18 +376,20 @@ func (t *Translator) SyncCNOnly() (CNSyncResult, error) {
 	t.setNote("cn-sync event stories")
 	storyProgress := progressTotal - 1
 	t.emit("sync.progress", "正在更新活动剧情", storyProgress, progressTotal)
-	storyCount, storyFetchFailures, err := t.syncEventStoriesCNOnly(storyProgress, progressTotal)
+	storyOutcome, err := t.syncEventStoriesCNOnly(storyProgress, progressTotal)
 	if err != nil {
 		if isTransientErr(err) {
-			result.Skipped = append(result.Skipped, "eventStories")
+			result.addSkipped("eventStories", err)
 		} else {
 			runErr = err
 			return result, runErr
 		}
 	} else {
-		result.EventStoryFiles = storyCount
-		if storyFetchFailures > 0 {
-			result.Skipped = append(result.Skipped, "eventStories")
+		result.EventStoryFiles = storyOutcome.Processed
+		result.AITranslationSkipped = storyOutcome.AITranslationSkipped
+		result.AITranslationNote = storyOutcome.AITranslationNote
+		if len(storyOutcome.PartialErrors) > 0 {
+			result.addSkipped("eventStories", summarizeErrors(storyOutcome.PartialErrors))
 		}
 	}
 	t.emit("sync.progress", "数据更新完成", progressTotal, progressTotal)
@@ -326,18 +456,20 @@ func (t *Translator) ManualAITranslate(req AITranslateRequest) (AITranslateResul
 	}
 	sort.Strings(candidates)
 
-	updates, err := t.translateBatch(provider, candidates)
-	if err != nil {
-		runErr = err
+	updates, translateErr := t.translateBatch(provider, candidates)
+	if len(updates) > 0 {
+		translated, moreSkipped, err := t.store.ApplyAITranslations(req.Category, req.Field, updates)
+		if err != nil {
+			runErr = err
+			return result, runErr
+		}
+		result.Translated = translated
+		result.SkippedExisting += moreSkipped
+	}
+	if translateErr != nil {
+		runErr = translateErr
 		return result, runErr
 	}
-	translated, moreSkipped, err := t.store.ApplyAITranslations(req.Category, req.Field, updates)
-	if err != nil {
-		runErr = err
-		return result, runErr
-	}
-	result.Translated = translated
-	result.SkippedExisting += moreSkipped
 	return result, nil
 }
 
@@ -356,9 +488,10 @@ func (t *Translator) translateBatch(provider string, keys []string) (map[string]
 			end = len(keys)
 		}
 		batch := keys[i:end]
-		t.emit("translate.progress", fmt.Sprintf("AI 翻译中 %d/%d", end, len(keys)), end, len(keys))
 		log.Printf("[translate] batch %d-%d/%d (provider=%s)", i+1, end, len(keys), provider)
-		translated, err := t.callLLM(provider, batch)
+		translated, err := t.callLLMWithAttempts(provider, batch, func(attempt, attempts int) {
+			t.emit("translate.progress", fmt.Sprintf("AI 翻译中 %d/%d · 请求 %d/%d", i, len(keys), attempt, attempts), i, len(keys))
+		})
 		if err != nil {
 			log.Printf("[translate] batch %d-%d failed: %v", i+1, end, err)
 			return updates, err
@@ -370,6 +503,7 @@ func (t *Translator) translateBatch(provider string, keys []string) (map[string]
 				}
 			}
 		}
+		t.emit("translate.progress", fmt.Sprintf("AI 翻译已完成 %d/%d", end, len(keys)), end, len(keys))
 		if end < len(keys) {
 			time.Sleep(cfg.RateDelay)
 		}

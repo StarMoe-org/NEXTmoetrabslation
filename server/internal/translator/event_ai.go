@@ -29,12 +29,20 @@ func (t *Translator) autoTranslateEventStory(eventID int) (int, error) {
 	if provider != "gemini" && provider != "openai" {
 		return 0, fmt.Errorf("unsupported provider: %s", provider)
 	}
-	return t.translateEventStory(eventID, provider)
+	if reason, unavailable := t.automaticLLMUnavailable(); unavailable {
+		return 0, fmt.Errorf("%s", reason)
+	}
+	return t.translateEventStoryWithMode(eventID, provider, true)
 }
 
 // translateEventStory runs LLM translation over an event story's untranslated
-// targets and writes results, updating the story source accordingly.
+// targets. Every successful batch is committed immediately so a later timeout
+// can be resumed without losing earlier work.
 func (t *Translator) translateEventStory(eventID int, provider string) (int, error) {
+	return t.translateEventStoryWithMode(eventID, provider, false)
+}
+
+func (t *Translator) translateEventStoryWithMode(eventID int, provider string, automatic bool) (int, error) {
 	targets, err := t.eventStore.UntranslatedTargets(eventID)
 	if err != nil {
 		return 0, err
@@ -42,61 +50,73 @@ func (t *Translator) translateEventStory(eventID int, provider string) (int, err
 	if len(targets) == 0 {
 		return 0, nil
 	}
-	texts := make([]string, len(targets))
-	for i, tgt := range targets {
-		texts[i] = tgt.JP
-	}
-	translated, err := t.translateOrdered(provider, texts)
-	if err != nil {
-		return 0, err
-	}
-	count, err := t.eventStore.ApplyEventTranslations(eventID, targets, translated, model.SourceLLM)
-	if err != nil {
-		return 0, err
-	}
-	if count == 0 {
-		return 0, nil
-	}
-	source := "jp_pending"
-	if count >= len(targets) {
-		source = model.SourceLLM
-	}
-	if err := t.eventStore.SetStorySource(eventID, source); err != nil {
-		return count, err
-	}
-	t.store.NotifyChange()
-	return count, nil
-}
-
-// translateOrdered translates texts in batches and returns a slice aligned to
-// the input (empty string where the model returned nothing).
-func (t *Translator) translateOrdered(provider string, texts []string) ([]string, error) {
 	cfg := t.snapshotConfig()
 	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
 		batchSize = 20
 	}
-	out := make([]string, len(texts))
-	for i := 0; i < len(texts); i += batchSize {
+	total := len(targets)
+	processed := 0
+	translatedCount := 0
+	t.emit("translate.progress", fmt.Sprintf("AI 剧情翻译准备中 0/%d", total), 0, total)
+	for i := 0; i < total; i += batchSize {
 		end := i + batchSize
-		if end > len(texts) {
-			end = len(texts)
+		if end > total {
+			end = total
 		}
-		t.emit("translate.progress", fmt.Sprintf("AI 剧情翻译 %d/%d", end, len(texts)), end, len(texts))
-		res, err := t.callLLM(provider, texts[i:end])
+		batchTargets := targets[i:end]
+		texts := make([]string, len(batchTargets))
+		for j, target := range batchTargets {
+			texts[j] = target.JP
+		}
+		batchNo := i/batchSize + 1
+		batchTotal := (total + batchSize - 1) / batchSize
+		onAttempt := func(attempt, attempts int) {
+			detail := fmt.Sprintf("AI 剧情翻译 %d/%d · 第 %d/%d 批 · 请求 %d/%d", processed, total, batchNo, batchTotal, attempt, attempts)
+			t.emit("translate.progress", detail, processed, total)
+		}
+		var res []string
+		if automatic {
+			res, err = t.callAutomaticLLM(provider, texts, onAttempt)
+		} else {
+			res, err = t.callLLMWithAttempts(provider, texts, onAttempt)
+		}
 		if err != nil {
-			return out, err
+			return translatedCount, fmt.Errorf("event %d batch %d/%d failed after saving %d/%d: %w", eventID, batchNo, batchTotal, processed, total, err)
 		}
-		for j, cn := range res {
-			if i+j < len(out) {
-				out[i+j] = strings.TrimSpace(cn)
-			}
+		for j := range res {
+			res[j] = strings.TrimSpace(res[j])
 		}
-		if end < len(texts) {
+		count, err := t.eventStore.ApplyEventTranslations(eventID, batchTargets, res, model.SourceLLM)
+		if err != nil {
+			return translatedCount, fmt.Errorf("persist event %d batch %d/%d: %w", eventID, batchNo, batchTotal, err)
+		}
+		translatedCount += count
+		processed = end
+		if count > 0 && t.store != nil {
+			t.store.NotifyChange()
+		}
+		t.emit("translate.progress", fmt.Sprintf("AI 剧情翻译已保存 %d/%d", processed, total), processed, total)
+		if end < total {
 			time.Sleep(cfg.RateDelay)
 		}
 	}
-	return out, nil
+
+	remaining, err := t.eventStore.UntranslatedTargets(eventID)
+	if err != nil {
+		return translatedCount, err
+	}
+	source := "jp_pending"
+	if len(remaining) == 0 {
+		source = model.SourceLLM
+	}
+	if err := t.eventStore.SetStorySource(eventID, source); err != nil {
+		return translatedCount, err
+	}
+	if t.store != nil {
+		t.store.NotifyChange()
+	}
+	return translatedCount, nil
 }
 
 // AITranslateAll translates every event story that still has untranslated lines.
@@ -136,11 +156,12 @@ func (t *Translator) AITranslateAll(provider string) (AITranslateAllResult, erro
 		result.TotalFields++
 		result.TotalCandidates += len(targets)
 		count, err := t.translateEventStory(sum.EventID, provider)
+		result.TotalTranslated += count
 		if err != nil {
 			result.Errors++
+			result.TotalSkipped += len(targets) - count
 			continue
 		}
-		result.TotalTranslated += count
 		result.TotalSkipped += len(targets) - count
 	}
 	return result, nil
@@ -173,13 +194,13 @@ func (t *Translator) AITranslateStory(eventID int, provider string) (AITranslate
 	result.TotalFields = 1
 	result.TotalCandidates = len(targets)
 	count, err := t.translateEventStory(eventID, provider)
+	result.TotalTranslated = count
+	result.TotalSkipped = len(targets) - count
 	if err != nil {
 		runErr = err
 		result.Errors++
 		return result, runErr
 	}
-	result.TotalTranslated = count
-	result.TotalSkipped = len(targets) - count
 	return result, nil
 }
 
@@ -228,8 +249,8 @@ func (t *Translator) RetryEventStorySync(eventID int) (map[string]any, error) {
 	result := map[string]any{"eventId": eventID}
 
 	if cnEventSet[eventID] && cnStoryByEvent[eventID] != nil {
-		episodes, hasTalk, _, errs := t.buildOfficialCNEpisodes(jpStory, cnStoryByEvent[eventID])
-		if errs == 0 && hasTalk {
+		episodes, hasTalk, _, episodeErrors := t.buildOfficialCNEpisodes(jpStory, cnStoryByEvent[eventID])
+		if len(episodeErrors) == 0 && hasTalk {
 			meta := model.EventStoryMeta{Source: "official_cn", Version: "1.0", LastUpdated: time.Now().Unix()}
 			if err := t.eventStore.ImportOrdered(eventID, meta, toOrderedEpisodes(episodes, "cn")); err != nil {
 				runErr = err
@@ -242,9 +263,9 @@ func (t *Translator) RetryEventStorySync(eventID int) (map[string]any, error) {
 		}
 	}
 
-	episodes, errs := t.buildJPPendingEpisodes(jpStory)
+	episodes, episodeErrors := t.buildJPPendingEpisodes(jpStory)
 	if len(episodes) == 0 {
-		runErr = fmt.Errorf("event %d: no episodes fetched (errors=%d)", eventID, errs)
+		runErr = fmt.Errorf("event %d: no episodes fetched (errors=%d)", eventID, len(episodeErrors))
 		return nil, runErr
 	}
 	meta := model.EventStoryMeta{Source: "jp_pending", Version: "1.0", LastUpdated: time.Now().Unix()}
@@ -255,7 +276,10 @@ func (t *Translator) RetryEventStorySync(eventID int) (map[string]any, error) {
 	t.store.NotifyChange()
 	result["source"] = "jp_pending"
 	result["episodes"] = len(episodes)
-	result["fetchErrors"] = errs
+	result["fetchErrors"] = len(episodeErrors)
+	if detail := summarizeErrors(episodeErrors); detail != nil {
+		result["fetchErrorDetails"] = detail.Error()
+	}
 
 	translated, autoErr := t.autoTranslateEventStory(eventID)
 	if autoErr != nil {

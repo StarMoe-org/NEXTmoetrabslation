@@ -23,14 +23,16 @@ import (
 
 // Setting keys. Secret keys must be listed in secretKeys below.
 const (
-	KeyLLMType       = "llm.type"       // "gemini" | "openai"
-	KeyGeminiAPIKey  = "llm.gemini.key" // secret
-	KeyGeminiModel   = "llm.gemini.model"
-	KeyOpenAIAPIKey  = "llm.openai.key" // secret
-	KeyOpenAIBaseURL = "llm.openai.base_url"
-	KeyOpenAIModel   = "llm.openai.model"
-	KeyBatchSize     = "translate.batch_size"
-	KeyRateDelayMS   = "translate.rate_delay_ms"
+	KeyLLMType             = "llm.type"       // "gemini" | "openai"
+	KeyGeminiAPIKey        = "llm.gemini.key" // secret
+	KeyGeminiModel         = "llm.gemini.model"
+	KeyOpenAIAPIKey        = "llm.openai.key" // secret
+	KeyOpenAIBaseURL       = "llm.openai.base_url"
+	KeyOpenAIModel         = "llm.openai.model"
+	KeyLLMRequestTimeoutMS = "llm.request_timeout_ms"
+	KeyLLMMaxRetries       = "llm.max_retries"
+	KeyBatchSize           = "translate.batch_size"
+	KeyRateDelayMS         = "translate.rate_delay_ms"
 
 	KeyUpstreamRepo                    = "upstream.repo"   // e.g. Team-Haruki/haruki-sekai-master
 	KeyUpstreamBranch                  = "upstream.branch" // e.g. main

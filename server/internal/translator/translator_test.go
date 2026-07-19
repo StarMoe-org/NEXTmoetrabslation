@@ -1,17 +1,21 @@
 package translator
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"moesekai/server/internal/config"
 	"moesekai/server/internal/db"
+	"moesekai/server/internal/model"
+	"moesekai/server/internal/store"
 )
 
 func openTranslatorConfig(t *testing.T) *config.Config {
@@ -26,6 +30,22 @@ func openTranslatorConfig(t *testing.T) *config.Config {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func openTestTranslator(t *testing.T) (*Translator, *store.EventStore, *config.Config) {
+	t.Helper()
+	database, err := db.Open(t.TempDir() + "/translator.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	cfg, err := config.New(database, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.New(database)
+	es := store.NewEventStore(database)
+	return New(s, es, cfg), es, cfg
 }
 
 func TestBuildAndParseXMLRoundTrip(t *testing.T) {
@@ -243,10 +263,160 @@ func TestBuildJPPendingEpisodesFetchesConcurrently(t *testing.T) {
 	}
 
 	episodes, errs := tr.buildJPPendingEpisodes(story)
-	if errs != 0 || len(episodes) != 4 {
-		t.Fatalf("unexpected build result: episodes=%d errors=%d", len(episodes), errs)
+	if len(errs) != 0 || len(episodes) != 4 {
+		t.Fatalf("unexpected build result: episodes=%d errors=%d", len(episodes), len(errs))
 	}
 	if maxActive.Load() < 2 {
 		t.Fatalf("scenario requests were not concurrent; max=%d", maxActive.Load())
+	}
+}
+
+func TestEventStoryTranslationPersistsBatchesAndResumes(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		if call == 2 {
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{
+				"delta": map[string]string{"content": `<translations><t id="1">译一</t><t id="2">译二</t></translations>`},
+			}},
+		})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+	}))
+	defer server.Close()
+
+	tr, es, cfg := openTestTranslator(t)
+	cfg.Set(config.KeyOpenAIAPIKey, "test")
+	cfg.Set(config.KeyOpenAIBaseURL, server.URL)
+	cfg.Set(config.KeyOpenAIModel, "test-model")
+	cfg.Set(config.KeyBatchSize, "2")
+	cfg.Set(config.KeyRateDelayMS, "0")
+	cfg.Set(config.KeyLLMRequestTimeoutMS, "1000")
+	cfg.Set(config.KeyLLMMaxRetries, "0")
+
+	const eventID = 99
+	keys := []string{"一", "二", "三", "四"}
+	talkData := map[string]string{}
+	talkSources := map[string]string{}
+	for _, key := range keys {
+		talkData[key] = ""
+		talkSources[key] = model.SourceUnknown
+	}
+	if err := es.ImportOrdered(eventID, model.EventStoryMeta{Source: "jp_pending"}, []store.OrderedEpisode{{
+		EpisodeNo:   "1",
+		ScenarioID:  "scenario",
+		TalkKeys:    keys,
+		TalkData:    talkData,
+		TalkSources: talkSources,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var progress []int
+	tr.SetProgress(func(_ string, _ string, current, _ int) {
+		progress = append(progress, current)
+	})
+	count, err := tr.translateEventStory(eventID, "openai")
+	if err == nil {
+		t.Fatal("expected the second batch to fail")
+	}
+	if count != 2 {
+		t.Fatalf("persisted count = %d, want 2", count)
+	}
+	remaining, err := es.UntranslatedTargets(eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("remaining after partial failure = %d, want 2", len(remaining))
+	}
+	for _, current := range progress {
+		if current > 2 {
+			t.Fatalf("progress advanced before failed batch was saved: %v", progress)
+		}
+	}
+	if len(progress) == 0 || progress[0] != 0 {
+		t.Fatalf("initial progress should be zero: %v", progress)
+	}
+
+	count, err = tr.translateEventStory(eventID, "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("resume translated %d, want 2", count)
+	}
+	remaining, err = es.UntranslatedTargets(eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining after resume = %d, want 0", len(remaining))
+	}
+}
+
+func TestCallLLMHonorsRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr, _, cfg := openTestTranslator(t)
+	cfg.Set(config.KeyOpenAIAPIKey, "test")
+	cfg.Set(config.KeyOpenAIBaseURL, server.URL)
+	cfg.Set(config.KeyLLMRequestTimeoutMS, "40")
+	cfg.Set(config.KeyLLMMaxRetries, "0")
+
+	started := time.Now()
+	_, err := tr.callLLM("openai", []string{"待翻译"})
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("request timeout was not enforced promptly: %s", elapsed)
+	}
+}
+
+func TestAutomaticLLMFailureSkipsRetriesAndOpensCooldown(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tr, _, cfg := openTestTranslator(t)
+	cfg.Set(config.KeyOpenAIAPIKey, "test")
+	cfg.Set(config.KeyOpenAIBaseURL, server.URL)
+	cfg.Set(config.KeyLLMMaxRetries, "5")
+
+	_, err := tr.callAutomaticLLM("openai", []string{"待翻译"}, nil)
+	if err == nil {
+		t.Fatal("expected automatic LLM call to fail")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("automatic translation retried %d times, want one fail-fast attempt", calls.Load())
+	}
+	if reason, unavailable := tr.automaticLLMUnavailable(); !unavailable || !strings.Contains(reason, "unavailable") {
+		t.Fatalf("LLM cooldown was not opened: unavailable=%v reason=%q", unavailable, reason)
+	}
+}
+
+func TestCNSyncSkippedErrorIncludesDetails(t *testing.T) {
+	result := CNSyncResult{}
+	result.addSkipped("cards", fmt.Errorf("GET mirror/cards.json: i/o timeout"))
+	result.addSkipped("cards", fmt.Errorf("GET fallback/cards.json: TLS handshake timeout"))
+
+	if len(result.Skipped) != 1 {
+		t.Fatalf("skipped categories were not deduplicated: %v", result.Skipped)
+	}
+	err := result.SkippedError()
+	if err == nil || !strings.Contains(err.Error(), "cards: GET fallback/cards.json: TLS handshake timeout") {
+		t.Fatalf("missing detailed skipped error: %v", err)
 	}
 }

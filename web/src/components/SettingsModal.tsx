@@ -215,7 +215,14 @@ function DataManagementCard({ show, onSyncFinished }: { show: ShowFn; onSyncFini
     try {
       const result = await runCNSync();
       if (result.skipped?.length) {
-        show(`数据更新完成，但跳过: ${result.skipped.join(", ")}`, "err");
+        const details = result.skipped.map((category) => {
+          const detail = result.skippedDetails?.[category];
+          if (!detail) return category;
+          return `${category}: ${detail.length > 180 ? `${detail.slice(0, 180)}…` : detail}`;
+        });
+        show(`数据更新完成，但跳过: ${details.join("; ")}`, "err");
+      } else if (result.aiTranslationSkipped) {
+        show(`数据更新完成；LLM 暂时不可用，已跳过 ${result.aiTranslationSkipped} 个剧情的自动 AI 翻译，可稍后手动续传`, "ok");
       } else {
         show("数据更新完成", "ok");
       }

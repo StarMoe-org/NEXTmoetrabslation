@@ -274,7 +274,7 @@ func (t *Translator) fetchJSONURLOnceContext(ctx context.Context, url string) (a
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("User-Agent", "moesekai-data-sync")
-	resp, err := t.client.Do(req)
+	resp, err := t.dataClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}

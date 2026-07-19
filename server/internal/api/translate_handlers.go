@@ -1,9 +1,7 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
-	"strings"
 
 	"moesekai/server/internal/sse"
 	"moesekai/server/internal/translator"
@@ -42,11 +40,7 @@ func (s *Server) handleCNSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.upstream != nil {
-		if len(result.Skipped) > 0 {
-			s.upstream.RecordSyncResult(fmt.Errorf("data sync skipped: %s", strings.Join(result.Skipped, ", ")))
-		} else {
-			s.upstream.RecordSyncResult(nil)
-		}
+		s.upstream.RecordSyncResult(result.SkippedError())
 	}
 	writeJSON(w, http.StatusOK, result)
 }

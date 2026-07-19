@@ -95,7 +95,10 @@ export interface CNSyncResult {
   categories: number;
   updatedEntries: number;
   eventStoryFiles: number;
+  aiTranslationSkipped?: number;
+  aiTranslationNote?: string;
   skipped?: string[];
+  skippedDetails?: Record<string, string>;
 }
 
 export interface BackupStatus {
